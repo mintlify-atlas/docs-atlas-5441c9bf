@@ -1,5 +1,5 @@
 ---
-title: "Kopia Desk Architecture: Electron Process Model"
+title: "Kopia Desk Architecture: Electron IPC Process Model"
 sidebarTitle: "Architecture"
 description: "How Kopia Desk is structured across Electron's main process, preload bridge, and renderer — and why each layer exists for security and testability."
 ---
@@ -59,6 +59,10 @@ All channels follow the `resource:action` pattern, making intent obvious at a gl
 | Channel | Direction | What it does |
 |---|---|---|
 | `drives:list` | invoke | Lists connected drives via PowerShell `Get-Volume` |
+| `dialog:select-folder` | invoke | Opens a native directory picker for the source folder |
+| `dialog:select-restore-target` | invoke | Opens a native directory picker for the restore destination |
+| `folders:quick-list` | invoke | Returns user shell folders (Pictures, Documents, etc.) that exist on the machine |
+| `config:default-excludes` | invoke | Returns the default exclusion pattern list |
 | `fs:scan-directory` | invoke | Recursively scans a folder, applying exclusions |
 | `fs:hash-file` | invoke | Full SHA-256 stream hash of a file |
 | `fs:quick-hash` | invoke | Head + tail 64 KB hash for change detection |
@@ -67,10 +71,15 @@ All channels follow the `resource:action` pattern, making intent obvious at a gl
 | `backup:plan-concurrency` | invoke | Detects drive type and returns adaptive concurrency |
 | `manifest:load` | invoke | Reads the saved manifest JSON for a source folder |
 | `manifest:save` | invoke | Writes manifest, creating a `.prev.json` backup first |
+| `sources:remember` | invoke | Persists the local path of a source folder for the Compare tab |
+| `sources:known-paths` | invoke | Retrieves all previously remembered source paths for a destination |
 | `journal:peek` | invoke | Reports interrupted backup without modifying anything |
 | `journal:check` | invoke | Cleans partial files after user confirmation |
+| `log:save` | invoke | Saves a JSON operation report to `.kopia-data/logs/` |
 | `restore:scan` | invoke | Diffs manifest vs local folder for the Compare tab |
+| `restore:full-list` | invoke | Lists all backup contents for a source without comparing (Restore tab) |
 | `restore:copy-files` | invoke | Restores files from backup to a chosen directory |
+| `restore:list-sources` | invoke | Lists all source folders available in the backup |
 | `settings:load` / `settings:save` | invoke | Persists user preferences to `userData` |
 
 The renderer also listens to the **`progress`** push event, which `backup:copy-files` and `restore:scan` emit for each file processed, carrying `{ phase, current, total, file, percent }`.

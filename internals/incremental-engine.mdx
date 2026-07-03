@@ -4,7 +4,7 @@ sidebarTitle: "Incremental Engine"
 description: "How Kopia Desk tracks file changes using JSON manifests, quick head+tail hashing, and a three-way diff to classify files as new, changed, or deleted."
 ---
 
-Kopia Desk never re-copies files blindly. Before each backup run it scans the source folder, loads the manifest written by the previous run, and computes a three-way diff to find exactly which files are new, which have changed, and which have been deleted from the source. Only the first two categories are queued for copy. A quick hash — reading just the first and last 64 KB of each file — then confirms whether a file whose timestamp changed actually has different content, avoiding unnecessary copies of touch-only changes.
+Kopia Desk never re-copies files blindly. Before each backup run it scans the source folder, loads the manifest written by the previous run, and computes a three-way diff to find exactly which files are new, which have changed, and which have been deleted from the source. Only the first two categories are queued for copy. A quick hash — hashing the file size as a string prefix, then reading the first 64 KB and (for files larger than 64 KB) the last 64 KB — then confirms whether a file whose timestamp changed actually has different content, avoiding unnecessary copies of touch-only changes.
 
 ## Manifests
 

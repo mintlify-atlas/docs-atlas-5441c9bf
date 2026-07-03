@@ -1,7 +1,7 @@
 ---
 title: "Backup Options: Versioning, Hashing, and Deduplication"
 sidebarTitle: "Options"
-description: "Configure Kopia Desk's backup behavior: enable file versioning, deep SHA-256 verification, content deduplication, exclusion filters, and the light/dark theme."
+description: "Configure Kopia Desk's backup behavior: file versioning, deep SHA-256 verification, content deduplication, exclusion filters, and the light/dark theme."
 ---
 
 Kopia Desk exposes four backup behavior toggles in the sidebar Options section, plus a theme selector in the top bar. All four toggles are persisted between sessions via `settings:load` and `settings:save` IPC calls, which read and write `kopia-desk-settings.json` in Electron's `userData` directory. The theme preference is stored separately in `localStorage` and never touches the main process.
@@ -18,10 +18,10 @@ Kopia Desk exposes four backup behavior toggles in the sidebar Options section, 
   Before overwriting a changed file in the backup, Kopia Desk gzip-compresses the existing backup copy and writes it to a timestamped archive folder:
 
   ```
-  <destDrive>\KopiaDesk_Backup\.kopia-data\versions\<ISO-timestamp>\<relative_path>.gz
+  <destDrive>\KopiaDesk_Backup\.kopia-data\versions\<ISO-timestamp>\<sourceName>\<relative_path>.gz
   ```
 
-  Each backup run that overwrites at least one file creates a new subdirectory named with the ISO timestamp of that run (colons and dots replaced to keep the name filesystem-safe). The compressed file preserves the full relative path of the original, so you can always identify which file a `.gz` archive corresponds to.
+  Each backup run that overwrites at least one file creates a new subdirectory named with the ISO timestamp of that run (colons and dots replaced to keep the name filesystem-safe). Within that directory, files are grouped by source folder name, and the full relative path of the original file is preserved, so you can always identify which file a `.gz` archive corresponds to.
 
   This is implemented by the `backup:copy-versions` IPC channel, which calls `writeVersionStream` in `main.js`. `writeVersionStream` pipes a read stream through Node's `zlib.createGzip()` into the destination file.
 
@@ -103,16 +103,16 @@ Patterns are matched **case-insensitively** against the file or folder **name on
 | `*` | Any sequence of characters (including none) |
 | `?` | Exactly one character |
 
-To retrieve the default list programmatically via IPC:
+To retrieve the default list programmatically via the contextBridge API:
 
 ```js
-const defaults = await window.kopiaAPI.invoke("config:default-excludes");
+const defaults = await window.kopiaAPI.defaultExcludePatterns();
 ```
 
-To apply custom patterns for a specific scan, pass them as the second argument to `fs:scan-directory`:
+To apply custom patterns for a specific scan, pass them as the second argument to `scanDirectory`:
 
 ```js
-await window.kopiaAPI.invoke("fs:scan-directory", folderPath, [
+await window.kopiaAPI.scanDirectory(folderPath, [
   "*.tmp",
   "~$*",
   "node_modules",

@@ -1,7 +1,7 @@
 ---
-title: "Path Safety Functions: safeName and safePath"
+title: "Path Safety Utilities: safeName, safePath, and More"
 sidebarTitle: "Path Safety"
-description: "lib/core.js exports safeName and safePath for sanitizing file names and preventing path traversal attacks when writing to the backup drive."
+description: "lib/core.js exports safeName and safePath to sanitise file names and block path traversal attacks before any byte is written to the backup drive."
 ---
 
 Kopia Desk performs every file write operation through two safety primitives exported from `lib/core.js`. `safeName` normalises arbitrary strings into valid directory names and manifest keys, while `safePath` resolves a relative path and enforces that it stays inside the intended backup root — blocking path traversal attacks before a single byte hits the destination drive.
@@ -146,3 +146,15 @@ safePath('D:\\Backup', '../Backup2/evil.txt')
   `journal:check` handlers — skipping the call even once creates an
   unguarded write path to the host file system.
 </Warning>
+
+---
+
+## Other exports: `detectDriveType` and `hideFolder`
+
+Two additional utilities are exported from `lib/core.js` that relate to drive and folder management rather than path safety directly:
+
+- **`detectDriveType(driveRoot)`** — Queries PowerShell's `Get-PhysicalDisk` cmdlet to determine the media type (`"SSD"`, `"HDD"`, `"Unknown"`) and bus type (`"NVMe"`, `"SATA"`, `"USB"`, `"Unknown"`) of the drive at `driveRoot`. Returns `{ mediaType, busType }`. Used by the `backup:plan-concurrency` IPC channel to feed `pickConcurrency`. Falls back to `{ mediaType: "Unknown", busType: "Unknown" }` if the query fails.
+
+- **`hideFolder(folderPath)`** — Applies the Windows `+h` (hidden) and `+s` (system) attributes to a folder using `attrib.exe`. Returns `true` on success, `false` if the folder does not exist or the command fails. Called by `main.js` after saving a manifest, to keep the `.kopia-data` metadata directory invisible in Windows Explorer.
+
+These functions are documented in detail in the [Drives and Folders API reference](/api/drives-and-folders).

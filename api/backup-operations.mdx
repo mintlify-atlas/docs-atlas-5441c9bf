@@ -4,7 +4,84 @@ sidebarTitle: "Backup Operations"
 description: "window.kopiaAPI methods for planning copy concurrency, backing up files with progress events, saving compressed prior versions, and writing operation logs."
 ---
 
-Once the UI has computed which files are new or changed, these four methods carry out the actual backup. The recommended pattern is: call `planConcurrency()` to pick the right parallelism for the destination drive, optionally call `backupCopyVersions()` to preserve the files that are about to be overwritten, then call `backupCopyFiles()` to copy everything in parallel. When the operation finishes, `logSave()` persists the results as a timestamped JSON report.
+Once the UI has computed which files are new or changed, these six methods carry out the actual backup. Before starting, `journalPeek()` checks whether a previous run was interrupted; if so, `journalCheck()` cleans up any partial writes. The recommended copy pattern is: call `planConcurrency()` to pick the right parallelism for the destination drive, optionally call `backupCopyVersions()` to preserve the files that are about to be overwritten, then call `backupCopyFiles()` to copy everything in parallel. When the operation finishes, `logSave()` persists the results as a timestamped JSON report.
+
+---
+
+## `journalPeek(destRoot)`
+
+Inspects the journal directory on the backup drive and reports whether any previous backup run was interrupted, without deleting or modifying any files. The UI calls this on startup so it can warn the user before beginning a new backup run.
+
+The journal directory is located at `<destRoot>/KopiaDesk_Backup/.kopia-data/journal/`. Journal files use an append-only JSONL format: the first line records all planned destinations; subsequent lines record each file as it is successfully written. If the process is killed before `backupCopyFiles()` completes, the journal remains on disk with the pending entries still absent. `journalPeek()` reads these files to count the files that were planned but never completed.
+
+<ParamField path="destRoot" type="string" required>
+  Root path of the backup drive, e.g. `"E:\\"`. The journal directory is derived from this path.
+</ParamField>
+
+**Returns:** `Promise<{ found: number, pendingFiles: number, lastInterruptedAt: string | null }>`
+
+<ResponseField name="found" type="number" required>
+  Number of journal files found. `0` means no previous backup was interrupted.
+</ResponseField>
+
+<ResponseField name="pendingFiles" type="number" required>
+  Total number of files that were planned but not confirmed as written across all found journal files. A value greater than `0` indicates at least one incomplete backup.
+</ResponseField>
+
+<ResponseField name="lastInterruptedAt" type="string | null" required>
+  ISO 8601 timestamp of the most recent interrupted backup's start time, or `null` if none was found or all journals lacked a `startedAt` field.
+</ResponseField>
+
+```javascript
+const { found, pendingFiles, lastInterruptedAt } = await window.kopiaAPI.journalPeek('E:\\');
+if (found > 0) {
+  console.log(`Interrupted backup detected: ${pendingFiles} files pending since ${lastInterruptedAt}`);
+}
+// { found: 1, pendingFiles: 14, lastInterruptedAt: '2024-11-15T10:30:00.000Z' }
+```
+
+<Note>
+  `journalPeek()` returns `{ found: 0, pendingFiles: 0, lastInterruptedAt: null }` when the journal directory does not exist—this is the normal state after a clean backup completes, since `backupCopyFiles()` deletes the journal file on success.
+</Note>
+
+---
+
+## `journalCheck(destRoot)`
+
+Reads all journal files in the backup drive's journal directory, deletes any partially-written files that were planned but never confirmed, and then removes the journal files themselves. Call this method only after `journalPeek()` has confirmed that an interrupted backup exists and the user has acknowledged the cleanup.
+
+<ParamField path="destRoot" type="string" required>
+  Root path of the backup drive, e.g. `"E:\\"`.
+</ParamField>
+
+**Returns:** `Promise<{ found: number, filesCleaned: number, lastInterruptedAt: string | null }>`
+
+<ResponseField name="found" type="number" required>
+  Number of journal files that were processed and deleted.
+</ResponseField>
+
+<ResponseField name="filesCleaned" type="number" required>
+  Number of partially-written backup files that were removed from the backup drive.
+</ResponseField>
+
+<ResponseField name="lastInterruptedAt" type="string | null" required>
+  ISO 8601 timestamp from the most recent processed journal's `startedAt` field, or `null` if not available.
+</ResponseField>
+
+```javascript
+// First peek to see if cleanup is needed:
+const peek = await window.kopiaAPI.journalPeek('E:\\');
+if (peek.found > 0) {
+  // Show confirmation UI, then on user confirmation:
+  const result = await window.kopiaAPI.journalCheck('E:\\');
+  console.log(`Cleaned ${result.filesCleaned} partial files from ${result.found} interrupted backup(s)`);
+  // { found: 1, filesCleaned: 14, lastInterruptedAt: '2024-11-15T10:30:00.000Z' }
+}
+```
+
+<Warning>
+  `journalCheck()` permanently deletes files from the backup drive. Always call `journalPeek()` first and present the result to the user before invoking this method.
+</Warning>
 
 ---
 

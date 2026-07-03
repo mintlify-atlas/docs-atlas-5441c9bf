@@ -1,7 +1,7 @@
 ---
-title: "Operation Journal: Crash Detection and Cleanup"
+title: "Operation Journal: Incremental Crash-Safe Backup Tracking"
 sidebarTitle: "Journal"
-description: "lib/core.js journal functions track backup operations in append-only JSONL files, detect interrupted copies, and safely clean up partial files on the next run."
+description: "lib/core.js journal functions track backup progress in append-only JSONL files, detect interrupted copies, and clean up partial files on the next run."
 ---
 
 Before copying any files, Kopia Desk writes a journal to `.kopia-data/journal/` on the destination drive. The journal is an append-only JSONL file: its first line is a JSON header listing every file that is _planned_ to be copied; each subsequent line records one file path the moment it is successfully written. On a clean backup finish the journal file is deleted. If the app crashes, the OS shuts down, or the drive is disconnected mid-copy, the journal persists — and on the next run `peekJournals` detects it, warns the user, and `checkJournals` removes any files that were only partially written before handing control back to `backup:copy-files`.
@@ -13,8 +13,8 @@ Before copying any files, Kopia Desk writes a journal to `.kopia-data/journal/` 
 Each journal is a `.jsonl` file named `backup_<ISO-timestamp>.jsonl` inside the journal directory. The first line is always the header object; every line that follows records one completed relative destination path:
 
 ```json
-{"startedAt":"2024-01-15T10:29:55.000Z","planned":["KopiaDesk_Backup\\Fotos\\img1.jpg","KopiaDesk_Backup\\Fotos\\img2.jpg"]}
-"KopiaDesk_Backup\\Fotos\\img1.jpg"
+{"startedAt":"2024-01-15T10:29:55.000Z","planned":["KopiaDesk_Backup/Fotos/img1.jpg","KopiaDesk_Backup/Fotos/img2.jpg"]}
+"KopiaDesk_Backup/Fotos/img1.jpg"
 ```
 
 In this example `img1.jpg` was fully written and recorded as done; `img2.jpg` appears in `planned` but has no corresponding done-line, so it is treated as a partial file to be cleaned up.
@@ -30,7 +30,7 @@ In this example `img1.jpg` was fully written and recorded as done; `img2.jpg` ap
     returned file path is kept in memory for the duration of the copy run.
   </Step>
   <Step title="Append per file">
-    After each successful `fs.copyFileSync`, `appendJournalDone(journalPath, relativeDest)`
+    After each successful `fs.promises.copyFile`, `appendJournalDone(journalPath, relativeDest)`
     appends one JSON string line to the journal. Files not yet recorded are
     implicitly pending.
   </Step>
@@ -87,8 +87,8 @@ Creates the journal directory if it does not exist, then writes the JSONL header
 const journalPath = startJournal(
   'D:\\KopiaDesk_Backup\\.kopia-data\\journal',
   [
-    { relativeDest: 'Fotos\\img1.jpg' },
-    { relativeDest: 'Fotos\\img2.jpg' },
+    { relativeDest: 'KopiaDesk_Backup/Fotos/img1.jpg' },
+    { relativeDest: 'KopiaDesk_Backup/Fotos/img2.jpg' },
   ]
 );
 // journalPath → 'D:\KopiaDesk_Backup\.kopia-data\journal\backup_2024-01-15T10-29-55-000Z.jsonl'
@@ -108,7 +108,7 @@ Appends a single JSON string line to the journal file immediately after a file i
 
 <ParamField path="relativeDest" type="string" required>
   The relative destination path of the file that was just successfully written
-  (e.g. `'Fotos\\img1.jpg'`).
+  (e.g. `'KopiaDesk_Backup/Fotos/img1.jpg'`).
 </ParamField>
 
 ### Return value
@@ -120,7 +120,7 @@ Appends a single JSON string line to the journal file immediately after a file i
 
 ```javascript
 // Called once per successfully copied file inside backup:copy-files
-appendJournalDone(journalPath, 'Fotos\\img1.jpg');
+appendJournalDone(journalPath, 'KopiaDesk_Backup/Fotos/img1.jpg');
 ```
 
 ---

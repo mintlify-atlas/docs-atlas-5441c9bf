@@ -1,7 +1,7 @@
 ---
 title: "Security Model: Isolation, Path Safety, and Journals"
 sidebarTitle: "Security"
-description: "Kopia Desk's security design: Electron context isolation, path traversal prevention, manifest size limits, journal-based crash recovery, and name collision handling."
+description: "Kopia Desk security layers: context isolation, safePath traversal checks, 50 MB manifest cap, journal crash recovery, and source-name collision prevention."
 ---
 
 Kopia Desk applies several layers of defence to keep backup operations safe: the renderer is isolated from Node.js at the Electron level, every file write is guarded by a path traversal check, manifest files are capped at a safe size, folder names are sanitised before they become filesystem paths, and a journal detects and recovers from interrupted backups. Understanding these mechanisms helps when debugging unexpected errors or auditing the codebase.

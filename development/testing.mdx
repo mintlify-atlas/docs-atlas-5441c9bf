@@ -1,5 +1,5 @@
 ---
-title: "Testing Kopia Desk: Node Test Runner and CI"
+title: "Testing Kopia Desk with Node's Built-in Test Runner"
 sidebarTitle: "Testing"
 description: "Run Kopia Desk's 31-test suite with Node's built-in test runner. Tests cover safeName, safePath, exclusion filters, hashing, scanning, and the journal."
 ---
@@ -138,7 +138,7 @@ Verifies the disk-type × file-size concurrency heuristic:
 | HDD, avg file < 2 MB (many small files) | `2` |
 | HDD, avg file ≥ 2 MB (large files) | `1` |
 | SSD (`mediaType: "SSD"`), small files | `8` |
-| NVMe (`busType: "NVMe"`, unknown mediaType), mixed | `4` |
+| NVMe (`busType: "NVMe"`, unknown mediaType), large files | `4` |
 | Unknown disk type, small files | `4` |
 | Unknown disk type, large files | `2` |
 

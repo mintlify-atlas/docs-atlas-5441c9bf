@@ -1,5 +1,5 @@
 ---
-title: "Get Started with Kopia Desk in 5 Minutes"
+title: "Kopia Desk Quickstart: Back Up Your First Folder Fast"
 sidebarTitle: "Quickstart"
 description: "Learn how to back up your first folder with Kopia Desk. Add a source, pick a destination drive, scan for changes, and copy in five guided steps."
 ---
@@ -20,7 +20,7 @@ This guide walks you through your first backup with Kopia Desk — from launchin
     npm start
     ```
 
-    The main window opens at 1300 × 820 px. The top bar shows counters for selected folders and total size; the sidebar on the left contains all controls.
+    The main window opens at 1300 × 820 px. The top bar shows three counters — folders added, changes detected, and files copied — alongside the theme toggle; the sidebar on the left contains all controls.
   </Step>
 
   <Step title="Add a source folder">
@@ -55,7 +55,7 @@ This guide walks you through your first backup with Kopia Desk — from launchin
     |---|---|---|
     | **Versioning** | On | Before overwriting a changed file in the backup, saves the previous version compressed with gzip in `.kopia-data\versions\<date>\` |
     | **Deep hash** | Off | Computes a full SHA-256 over every file instead of the fast header+tail hash |
-    | **Deduplication** | On | Creates NTFS hardlinks for files whose content already exists in the backup, avoiding duplicate storage |
+    | **Deduplication** | Off | Creates NTFS hardlinks for files whose content already exists in the backup, avoiding duplicate storage |
     | **Show technical details** | Off | Reveals disk type (SSD/HDD/USB) and the concurrency value being used for this run |
   </Step>
 
@@ -88,7 +88,7 @@ This guide walks you through your first backup with Kopia Desk — from launchin
     Click **Copiar aceptados**. Kopia Desk:
 
     1. Opens a JSONL journal for crash recovery
-    2. Detects the drive type via PowerShell and picks the optimal concurrency (e.g. up to 8 parallel writes on NVMe SSD for small files, 1 on a spinning HDD)
+    2. Detects the drive type via PowerShell and picks the optimal concurrency (e.g. up to 8 parallel writes on NVMe SSD for small files, 1–2 on a spinning HDD)
     3. If versioning is on, compresses and saves the previous version of each changed file before overwriting
     4. Copies new and changed files, creating hardlinks for any content already in the deduplication index
     5. Emits a progress event after every file

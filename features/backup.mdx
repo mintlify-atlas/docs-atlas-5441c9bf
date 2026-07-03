@@ -1,7 +1,7 @@
 ---
-title: "Incremental Backup: Scan, Diff, and Copy"
+title: "Incremental Backup: Scan, Diff, Copy, and Deduplicate"
 sidebarTitle: "Backup"
-description: "How Kopia Desk scans source folders, compares against the saved manifest, and copies only new and changed files to the destination drive with adaptive concurrency."
+description: "How Kopia Desk scans source folders, diffs against the saved manifest, and copies only new and changed files to the destination drive."
 ---
 
 Kopia Desk's backup feature compares every source file against a saved manifest to determine exactly which files are new, changed, or deleted — then copies only what needs to change. Nothing is transferred blindly: each run builds on the previous result, so even large folders with thousands of files can be backed up in seconds when little has changed.
@@ -93,10 +93,10 @@ If the destination filesystem does not support hardlinks (for example, a FAT32 o
 When **Guardar versiones de cambiados** is enabled (the default), Kopia Desk calls `backup:copy-versions` before overwriting any changed file in the backup. The IPC handler calls `writeVersionStream`, which gzip-compresses the existing backup copy and writes it to:
 
 ```
-<destDrive>\KopiaDesk_Backup\.kopia-data\versions\<ISO-timestamp>\<relative_path>.gz
+<destDrive>\KopiaDesk_Backup\.kopia-data\versions\<ISO-timestamp>\<sourceName>\<relative_path>.gz
 ```
 
-This lets you recover the file as it was before the most recent backup. Versions are stored by ISO timestamp so multiple versioned runs accumulate in separate subdirectories.
+This lets you recover the file as it was before the most recent backup. Versions are stored under a timestamp folder, then grouped by source folder name, so multiple versioned runs accumulate in separate subdirectories.
 
 ---
 
@@ -120,11 +120,11 @@ The following names are excluded by default (`DEFAULT_EXCLUDES` in `lib/core.js`
 Patterns support `*` (any number of characters) and `?` (a single character), and are matched case-insensitively against the file or folder **name only** (not the full path). To use a custom pattern list, pass it as the second argument to `fs:scan-directory`:
 
 ```js
-// Retrieve defaults via IPC
-const defaults = await window.kopiaAPI.invoke("config:default-excludes");
+// Retrieve defaults via the contextBridge API
+const defaults = await window.kopiaAPI.defaultExcludePatterns();
 
 // Or pass custom patterns to the scan
-await window.kopiaAPI.invoke("fs:scan-directory", folderPath, [
+await window.kopiaAPI.scanDirectory(folderPath, [
   "*.tmp",
   "~$*",
   "node_modules",

@@ -13,7 +13,7 @@ Kopia Desk is a Windows desktop application built on Electron that backs up your
     Recursively scans source folders and diffs them against the saved manifest. Uses a fast header+tail hash (64 KB each end) to skip files that only had their timestamp touched, falling back to a full SHA-256 stream when deep verification is enabled.
   </Card>
   <Card title="Adaptive Concurrency" icon="bolt">
-    Detects whether the destination is an SSD, HDD, or USB drive via PowerShell and tunes copy parallelism accordingly — up to 8 concurrent writes on NVMe/SSD for small files, down to 1 on spinning HDDs to avoid seek thrashing.
+    Detects whether the destination is an SSD, HDD, or USB drive via PowerShell and tunes copy parallelism accordingly — up to 8 concurrent writes on NVMe/SSD for small files, down to 1–2 on spinning HDDs to avoid seek thrashing.
   </Card>
   <Card title="Content Deduplication" icon="copy">
     Maintains a content index (`content-index.json`) keyed by SHA-256 hash. When a file already exists in the backup under any name or folder, Kopia Desk creates an NTFS hardlink instead of a second physical copy, saving space without any external tool.
@@ -37,7 +37,7 @@ Kopia Desk is a Windows desktop application built on Electron that backs up your
 
 ## Configurable Exclusion Filters
 
-Kopia Desk ships with a default set of exclusion patterns that are applied during every recursive scan. You can review and edit them in the sidebar before scanning.
+Kopia Desk ships with a default set of exclusion patterns that are applied during every recursive scan. These patterns are loaded automatically at startup and passed to every scan; they keep metadata noise out of your backup without any manual configuration.
 
 | Default pattern | What it skips |
 |---|---|
@@ -71,7 +71,7 @@ Kopia Desk follows Electron's three-layer security model strictly — the render
 ┌─────────────────────────────────────────────────────────┐
 │  main.js  (Node.js — full OS access)                    │
 │  ├── lib/core.js  (scan, hash, drives, journal)         │
-│  └── IPC handlers (30+ channels via ipcMain.handle)     │
+│  └── IPC handlers (24 channels via ipcMain.handle)      │
 ├─────────────────────────────────────────────────────────┤
 │  preload.js  (contextBridge — isolated context)         │
 │  └── window.kopiaAPI  (explicit allow-list only)        │
