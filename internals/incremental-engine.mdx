@@ -1,0 +1,180 @@
+---
+title: "Incremental Engine: Manifests, Hashing, and Diffing"
+sidebarTitle: "Incremental Engine"
+description: "How Kopia Desk tracks file changes using JSON manifests, quick head+tail hashing, and a three-way diff to classify files as new, changed, or deleted."
+---
+
+Kopia Desk never re-copies files blindly. Before each backup run it scans the source folder, loads the manifest written by the previous run, and computes a three-way diff to find exactly which files are new, which have changed, and which have been deleted from the source. Only the first two categories are queued for copy. A quick hash — reading just the first and last 64 KB of each file — then confirms whether a file whose timestamp changed actually has different content, avoiding unnecessary copies of touch-only changes.
+
+## Manifests
+
+A manifest is a JSON object stored at `.kopia-data/manifests/<sourceName>.json` on the destination drive. Each key is the relative path of a file; the value is:
+
+```json
+{
+  "name": "foto.jpg",
+  "path": "Vacaciones/foto.jpg",
+  "size": 3145728,
+  "lastModified": 1705312200000,
+  "hash": "a3f1..."
+}
+```
+
+Manifests are loaded with the `manifest:load` IPC channel before the scan begins and saved with `manifest:save` after a successful copy. Before overwriting the current manifest, `manifest:save` copies it to `<sourceName>.prev.json` so one previous snapshot is always available.
+
+<Note>
+  `hash` in the manifest is `null` when deep verification mode is off. The field is only populated (and persisted) if the user enables the SHA-256 full-hash option.
+</Note>
+
+## Directory Scan
+
+`scanDirectoryRecursive(dirPath, basePath, compiledExcludes)` in `lib/core.js` walks the entire source tree and returns a flat object keyed by relative path:
+
+```js
+// lib/core.js
+async function scanDirectoryRecursive(dirPath, basePath, compiledExcludes) {
+  const files = {};
+  let entries;
+  try {
+    entries = await fs.promises.readdir(dirPath, { withFileTypes: true });
+  } catch (err) {
+    if (err.code === "EACCES" || err.code === "EPERM" || err.code === "ENOENT") return files;
+    throw err;
+  }
+
+  await Promise.all(
+    entries.map(async (entry) => {
+      if (isExcluded(entry.name, compiledExcludes)) return;
+      const fullPath = path.join(dirPath, entry.name);
+      const relativePath = basePath ? basePath + "/" + entry.name : entry.name;
+
+      if (entry.isDirectory()) {
+        const nested = await scanDirectoryRecursive(fullPath, relativePath, compiledExcludes);
+        Object.assign(files, nested);
+      } else if (entry.isFile()) {
+        try {
+          const stat = await fs.promises.stat(fullPath);
+          files[relativePath] = {
+            name: entry.name,
+            path: relativePath,
+            fullPath,
+            size: stat.size,
+            lastModified: stat.mtimeMs,
+            hash: null,
+          };
+        } catch {
+          // skip inaccessible files
+        }
+      }
+    })
+  );
+
+  return files;
+}
+```
+
+Key design decisions:
+
+- **`fs.promises.readdir` with `{ withFileTypes: true }`** avoids a second `stat` call just to distinguish files from directories; `entry.isDirectory()` and `entry.isFile()` are available directly on the `Dirent` object.
+- **`Promise.all` at each directory level** processes all entries within a directory in parallel, maximising throughput especially on SSDs and USB drives with high seek latency amortised across concurrent requests.
+- **EPERM / ENOENT swallowed silently** because Windows frequently returns `EPERM` for protected system folders (`System Volume Information`, etc.). The scan continues rather than aborting.
+
+<Note>
+  Async I/O (`fs.promises`) is used throughout instead of synchronous `fs.readdirSync` / `fs.statSync`. Blocking the main process would freeze the entire Electron window for the duration of the scan — unacceptable for folders with tens of thousands of files.
+</Note>
+
+## Three-Way Diff
+
+After the scan the renderer's `app.js` compares the scan result against the loaded manifest:
+
+<Tabs>
+  <Tab title="New">
+    A relative path appears in the **scan result** but **not** in the manifest. The file did not exist during the previous backup run. It is queued for copy.
+  </Tab>
+  <Tab title="Changed">
+    A relative path appears in **both** the scan result and the manifest, but `size` or `lastModified` differs. If deep-verification mode is on, a full SHA-256 hash is also compared. The file is queued for copy.
+  </Tab>
+  <Tab title="Deleted">
+    A relative path appears in the **manifest** but **not** in the scan result. The file was removed from the source since the last run. The user can choose to update the manifest to stop tracking it; the backup copy is never automatically deleted.
+  </Tab>
+</Tabs>
+
+## Quick Hash (`quickHashFile`)
+
+When a file is detected as changed by `size` or `lastModified`, Kopia Desk can optionally run a quick hash to verify the content truly changed before copying. This avoids re-copying files whose timestamp was updated by an application without modifying the actual bytes.
+
+```js
+// lib/core.js
+async function quickHashFile(fullPath, size) {
+  const CHUNK = 65536; // 64 KB
+  const fh = await fs.promises.open(fullPath, "r");
+  try {
+    const hash = crypto.createHash("sha256");
+    hash.update(String(size));          // include size in the hash input
+    if (size > 0) {
+      const headBuf = Buffer.alloc(Math.min(CHUNK, size));
+      const { bytesRead: headBytes } = await fh.read(headBuf, 0, headBuf.length, 0);
+      hash.update(headBuf.subarray(0, headBytes));
+
+      if (size > CHUNK) {
+        const tailSize = Math.min(CHUNK, size);
+        const tailBuf = Buffer.alloc(tailSize);
+        const { bytesRead: tailBytes } = await fh.read(tailBuf, 0, tailSize, size - tailSize);
+        hash.update(tailBuf.subarray(0, tailBytes));
+      }
+    }
+    return hash.digest("hex");
+  } finally {
+    await fh.close();
+  }
+}
+```
+
+The hash input is: `String(size)` + first 64 KB + last 64 KB (only if `size > 64 KB`). Using SHA-256 over size-prefixed head and tail catches the overwhelming majority of real content changes with at most two sequential reads of 64 KB, regardless of file size.
+
+## Full Hash (`hashFileAsync`)
+
+When deep verification mode is enabled, or when computing a content fingerprint for deduplication, the entire file is streamed through `crypto.createHash('sha256')`:
+
+```js
+// lib/core.js
+function hashFileAsync(filePath) {
+  return new Promise((resolve, reject) => {
+    const hash = crypto.createHash("sha256");
+    const stream = fs.createReadStream(filePath);
+    stream.on("data", (chunk) => hash.update(chunk));
+    stream.on("end", () => resolve(hash.digest("hex")));
+    stream.on("error", reject);
+  });
+}
+```
+
+`hashFileAsync` is called by `copyOneTask` in `main.js` when deduplication is active — the full SHA-256 of every file to be copied is computed before looking up or inserting an entry in the content index.
+
+## Content Index for Deduplication
+
+When deduplication is enabled, `main.js` maintains a content index at `.kopia-data/content-index.json`:
+
+```json
+{
+  "a3f1c2...": "KopiaDesk_Backup\\Fotos\\Vacaciones\\foto.jpg",
+  "7b9e44...": "KopiaDesk_Backup\\Documentos\\informe.pdf"
+}
+```
+
+The key is the SHA-256 hex digest; the value is the relative path of the first backup copy. When a new file hashes to a digest already present in the index, `main.js` calls `fs.promises.link` to create a hardlink to the existing backup file instead of copying it again. The index is loaded at the start of a `backup:copy-files` call and saved atomically at the end of the session.
+
+## Manifest Versioning
+
+Every `manifest:save` call preserves exactly one prior version:
+
+```js
+// main.js
+if (fs.existsSync(fp)) {
+  const prevPath = fp.replace(/\.json$/, ".prev.json");
+  fs.copyFileSync(fp, prevPath);
+}
+fs.writeFileSync(fp, JSON.stringify(manifest, null, 2), "utf-8");
+```
+
+Only `<sourceName>.json` (current) and `<sourceName>.prev.json` (previous) are kept. There is no deeper version history in the manifest files themselves — older versions of changed files are stored as gzip-compressed copies inside `.kopia-data/versions/`.

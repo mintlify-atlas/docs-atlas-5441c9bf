@@ -1,0 +1,88 @@
+---
+title: "Full Restore: Recover Any Backup Folder Anywhere"
+sidebarTitle: "Restore"
+description: "Use Kopia Desk's Restore tab to recover a complete backup folder to any location on your PC, without needing the original path or user profile."
+---
+
+The Restore tab in Kopia Desk lets you copy an entire backed-up folder to any location you choose — useful after a Windows reinstall, a new user profile, or when the original source path no longer exists. Unlike the Compare tab, which only fills in missing files against an existing local folder, Restore transfers every file from the backup unconditionally.
+
+## How It Works
+
+<Steps>
+  <Step title="Switch to the Restore tab">
+    Click the **Restaurar** tab in the top bar of the main panel. The view shows a prompt to select the drive that contains your backup.
+  </Step>
+  <Step title="Select the backup drive">
+    Choose the drive from the destination dropdown in the sidebar. This is the external drive or USB that holds your `KopiaDesk_Backup` folder — not the drive you want to restore *to*.
+  </Step>
+  <Step title="Load available backup folders">
+    Kopia Desk calls `restore:list-sources`, which reads `.kopia-data/manifests/` on the selected drive and returns the name of every folder that has a manifest file. The results appear as a list in the Restore panel.
+
+    <Note>
+      `restore:list-sources` only finds folders that have a `.json` manifest in `.kopia-data/manifests/`. If a manifest was deleted manually, that folder will not appear in the list even if its backup files still exist on the drive.
+    </Note>
+  </Step>
+  <Step title="Select the folder to restore">
+    Click the name of the backed-up folder you want to recover. This selects it as the restore source.
+  </Step>
+  <Step title="Choose a restore destination">
+    Click the restore button. Kopia Desk opens a native Windows folder dialog (`dialog:select-restore-target`) so you can pick any folder on your PC as the restore target. The original path is not required — you can restore to a completely different drive letter or user profile.
+
+    <Tip>
+      You can plug in the backup drive on a brand-new PC and restore directly to any path. Kopia Desk does not require the original Windows user profile, username, or drive letter to be present.
+    </Tip>
+  </Step>
+  <Step title="Build the file list">
+    `restore:full-list` reads the manifest for the selected folder and returns every file entry, each augmented with its absolute path on the backup drive (`backupFullPath`). This is the complete set of files that will be copied — no filtering against local content.
+  </Step>
+  <Step title="Copy files with progress">
+    `restore:copy-files` copies each file from `backupFullPath` to the target directory, preserving the relative folder structure recorded in the manifest. Files are copied with the same adaptive concurrency used during backup. Progress events are emitted after each file.
+  </Step>
+</Steps>
+
+---
+
+## Progress Events
+
+During a restore, `restore:copy-files` sends a `progress` event to the renderer after each file is copied:
+
+```js
+{
+  phase: "restore",
+  current: number,   // files copied so far
+  total: number,     // total files to copy
+  file: string,      // relative path of the file just copied
+  percent: number    // 0–100
+}
+```
+
+Subscribe to these events using the `window.kopiaAPI.onProgress` callback:
+
+```js
+window.kopiaAPI.onProgress((event) => {
+  if (event.phase === "restore") {
+    console.log(`${event.percent}% — ${event.file}`);
+  }
+});
+```
+
+---
+
+## Relative Structure Preserved
+
+Files are restored to the same relative path they had when they were backed up. If the backup manifest records a file at `Fotos/Vacaciones/playa.jpg`, it will be written to `<targetDir>/Fotos/Vacaciones/playa.jpg` in the restore destination. All intermediate directories are created automatically.
+
+---
+
+## Restore vs. Compare
+
+Restore and Compare both copy files from the backup to your PC, but they serve different purposes:
+
+| | Restore | Compare |
+|---|---|---|
+| What it copies | All files in the backup folder | Only files missing from a local folder |
+| Requires an existing local folder | No | Yes |
+| Detects files lost from backup | No | Yes |
+| Best use case | After format or new PC | Accidental deletion recovery |
+
+For selective recovery when you still have the original folder on your PC, see the [Compare](./compare) page.

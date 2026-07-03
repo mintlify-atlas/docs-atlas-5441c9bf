@@ -1,0 +1,134 @@
+---
+title: "Backup Options: Versioning, Hashing, and Deduplication"
+sidebarTitle: "Options"
+description: "Configure Kopia Desk's backup behavior: enable file versioning, deep SHA-256 verification, content deduplication, exclusion filters, and the light/dark theme."
+---
+
+Kopia Desk exposes four backup behavior toggles in the sidebar Options section, plus a theme selector in the top bar. All four toggles are persisted between sessions via `settings:load` and `settings:save` IPC calls, which read and write `kopia-desk-settings.json` in Electron's `userData` directory. The theme preference is stored separately in `localStorage` and never touches the main process.
+
+<Note>
+  All options except theme are stored in `kopia-desk-settings.json` in Electron's `userData` directory — typically `%APPDATA%\Kopia Desk\` on Windows. Settings are loaded automatically when the app starts and saved whenever a toggle is changed.
+</Note>
+
+---
+
+## Backup Behavior Toggles
+
+<Accordion title="Versioning — default ON">
+  Before overwriting a changed file in the backup, Kopia Desk gzip-compresses the existing backup copy and writes it to a timestamped archive folder:
+
+  ```
+  <destDrive>\KopiaDesk_Backup\.kopia-data\versions\<ISO-timestamp>\<relative_path>.gz
+  ```
+
+  Each backup run that overwrites at least one file creates a new subdirectory named with the ISO timestamp of that run (colons and dots replaced to keep the name filesystem-safe). The compressed file preserves the full relative path of the original, so you can always identify which file a `.gz` archive corresponds to.
+
+  This is implemented by the `backup:copy-versions` IPC channel, which calls `writeVersionStream` in `main.js`. `writeVersionStream` pipes a read stream through Node's `zlib.createGzip()` into the destination file.
+
+  **Tooltip shown in the UI:**
+  > "Antes de sobrescribir un archivo cambiado, guarda una copia comprimida de la versión anterior. Así puedes recuperar cómo era antes."
+
+  **When to turn it off:** if the destination drive is small and you do not need version history, disabling this option prevents the `.kopia-data/versions/` folder from growing over time.
+</Accordion>
+
+<Accordion title="Deep verification / SHA-256 — default OFF">
+  Controls which hash strategy is used when comparing files against the manifest.
+
+  **When OFF (default) — `quickHashFile`:**
+  Reads only the first and last **64 KB** of the file, then produces a SHA-256 digest prefixed with the file size as a string. This is fast and catches virtually all real-world changes, including edits to the beginning or end of a file. It correctly ignores files that only had their timestamp updated without any content change.
+
+  **When ON — `hashFileAsync`:**
+  Streams the **entire file** through SHA-256. More reliable for detecting changes buried in the middle of very large binary files, but noticeably slower when there are many large files to scan.
+
+  Both functions use async I/O (`fs.promises`) so they never block the Electron main process while hashing.
+
+  **Tooltip shown in the UI:**
+  > "Compara el contenido completo de cada archivo (SHA-256). Es más lento, pero asegura que el contenido realmente cambió."
+
+  **When to turn it on:** if you work with large binary files (video, disk images, databases) where a change in the middle of the file would not alter the file size or timestamp.
+</Accordion>
+
+<Accordion title="Deduplication — default OFF">
+  When enabled, `backup:copy-files` computes a full SHA-256 hash of each source file before writing it. It then looks up `.kopia-data/content-index.json` — a JSON map of `hash → relative backup path`. If a file with the same content already exists in the backup (even in a different folder or under a different name), Kopia Desk creates an **NTFS hardlink** using `fs.link` instead of copying the bytes again.
+
+  If the destination filesystem does not support hardlinks (FAT32, exFAT), the `fs.link` call fails silently and the file is copied normally. The content index is updated and persisted at the end of each backup run.
+
+  When multiple files in the same backup batch share content, only the first one is physically written. The others wait for the first write to complete, then link to the result — preventing redundant parallel copies of the same content within a single run.
+
+  **Tooltip shown in the UI:**
+  > "Si tienes archivos idénticos repetidos, se guarda el contenido una sola vez. Ahorra espacio en el disco de backup."
+
+  <Tip>
+    Deduplication is best suited for photo collections, downloaded archives, or any scenario where the same files appear in multiple source folders. On a backup drive with mostly unique files, enabling it adds hash-computation overhead with little space savings.
+  </Tip>
+</Accordion>
+
+<Accordion title="Show technical details — default OFF">
+  When enabled, the sidebar shows the detected drive type and the copy concurrency number that will be used for the next backup:
+
+  - **Drive type** — the `MediaType` (e.g., `SSD`, `HDD`) and `BusType` (e.g., `NVMe`, `USB`) returned by PowerShell `Get-PhysicalDisk`.
+  - **Concurrency** — the number of files that will be copied in parallel, as determined by `pickConcurrency`.
+
+  This information is hidden by default to keep the interface clean for everyday use.
+
+  **Tooltip shown in the UI:**
+  > "Muestra información técnica, como el tipo de disco detectado (SSD/HDD/USB) y cuántos archivos se copian en paralelo."
+</Accordion>
+
+---
+
+## Exclusion Filters
+
+Exclusion filters are always active and cannot be disabled from the UI. They are applied during every scan, regardless of which options are toggled.
+
+**Default excluded names** (defined as `DEFAULT_EXCLUDES` in `lib/core.js`):
+
+```js
+[
+  "Thumbs.db",
+  "desktop.ini",
+  "$RECYCLE.BIN",
+  "System Volume Information",
+  ".git",
+  "node_modules",
+  "*.tmp",
+  "~$*"
+]
+```
+
+Patterns are matched **case-insensitively** against the file or folder **name only** (not the full path). Two wildcard characters are supported:
+
+| Wildcard | Meaning |
+|---|---|
+| `*` | Any sequence of characters (including none) |
+| `?` | Exactly one character |
+
+To retrieve the default list programmatically via IPC:
+
+```js
+const defaults = await window.kopiaAPI.invoke("config:default-excludes");
+```
+
+To apply custom patterns for a specific scan, pass them as the second argument to `fs:scan-directory`:
+
+```js
+await window.kopiaAPI.invoke("fs:scan-directory", folderPath, [
+  "*.tmp",
+  "~$*",
+  "node_modules",
+  "build",
+  "dist",
+]);
+```
+
+If the second argument is an empty array or omitted, `DEFAULT_EXCLUDES` is used automatically.
+
+---
+
+## Theme
+
+A **Tema oscuro / Tema claro** toggle sits in the top-right corner of the top bar. Clicking it switches the visual theme immediately.
+
+Kopia Desk implements theming by toggling the `data-theme="dark"` attribute on the `<html>` element. All colors in `styles.css` are defined as CSS custom properties on `:root`, with a parallel set of overrides under `:root[data-theme="dark"]`. Switching themes requires no style-sheet reload.
+
+The preference is saved to `localStorage` (key managed by `initTheme()` in `app.js`) and restored the next time the app opens. This is entirely client-side — no IPC call is involved, and the setting does not appear in `kopia-desk-settings.json`.

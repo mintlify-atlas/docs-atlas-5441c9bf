@@ -1,0 +1,262 @@
+---
+title: "Operation Journal: Crash Detection and Cleanup"
+sidebarTitle: "Journal"
+description: "lib/core.js journal functions track backup operations in append-only JSONL files, detect interrupted copies, and safely clean up partial files on the next run."
+---
+
+Before copying any files, Kopia Desk writes a journal to `.kopia-data/journal/` on the destination drive. The journal is an append-only JSONL file: its first line is a JSON header listing every file that is _planned_ to be copied; each subsequent line records one file path the moment it is successfully written. On a clean backup finish the journal file is deleted. If the app crashes, the OS shuts down, or the drive is disconnected mid-copy, the journal persists — and on the next run `peekJournals` detects it, warns the user, and `checkJournals` removes any files that were only partially written before handing control back to `backup:copy-files`.
+
+---
+
+## Journal file format
+
+Each journal is a `.jsonl` file named `backup_<ISO-timestamp>.jsonl` inside the journal directory. The first line is always the header object; every line that follows records one completed relative destination path:
+
+```json
+{"startedAt":"2024-01-15T10:29:55.000Z","planned":["KopiaDesk_Backup\\Fotos\\img1.jpg","KopiaDesk_Backup\\Fotos\\img2.jpg"]}
+"KopiaDesk_Backup\\Fotos\\img1.jpg"
+```
+
+In this example `img1.jpg` was fully written and recorded as done; `img2.jpg` appears in `planned` but has no corresponding done-line, so it is treated as a partial file to be cleaned up.
+
+---
+
+## Journal lifecycle
+
+<Steps>
+  <Step title="Start">
+    `startJournal(journalDirPath, tasks)` creates the journal directory and
+    writes the header line with `startedAt` and the full `planned` array. The
+    returned file path is kept in memory for the duration of the copy run.
+  </Step>
+  <Step title="Append per file">
+    After each successful `fs.copyFileSync`, `appendJournalDone(journalPath, relativeDest)`
+    appends one JSON string line to the journal. Files not yet recorded are
+    implicitly pending.
+  </Step>
+  <Step title="Clean finish">
+    When `backup:copy-files` completes with zero errors, `finishJournal(journalPath)`
+    deletes the journal file. No journal → no interrupted backup on the next run.
+  </Step>
+  <Step title="Crash / disconnect">
+    If the process is killed or the drive ejected, the journal file stays on
+    disk. The done-lines written so far reflect exactly which files were fully
+    copied.
+  </Step>
+  <Step title="Peek (read-only check)">
+    Next time the user selects the same destination, `peekJournals(journalDirPath)`
+    is called via the `journal:peek` IPC channel. It counts pending files and
+    returns the interrupted timestamp so the UI can display a warning — without
+    deleting or modifying anything.
+  </Step>
+  <Step title="Check (actual cleanup)">
+    Only after the user confirms the "Continuar y limpiar" prompt does
+    `checkJournals(journalDirPath, destRoot)` run. It deletes every pending
+    partial file from the destination root and then removes the journal files
+    themselves, leaving the backup directory in a consistent state.
+  </Step>
+</Steps>
+
+---
+
+## `startJournal(journalDirPath, tasks)`
+
+Creates the journal directory if it does not exist, then writes the JSONL header line containing the planned file list.
+
+### Parameters
+
+<ParamField path="journalDirPath" type="string" required>
+  Absolute path to the journal directory, typically
+  `<destRoot>/.kopia-data/journal/`. Created with `{ recursive: true }` if
+  absent.
+</ParamField>
+
+<ParamField path="tasks" type="{ relativeDest: string }[]" required>
+  Array of copy tasks. Each task's `relativeDest` is written into the
+  `planned` array of the journal header.
+</ParamField>
+
+### Return value
+
+<ResponseField name="startJournal" type="string | null">
+  The absolute path to the newly created `.jsonl` file, or `null` if `tasks`
+  is empty (no journal is written for a no-op run).
+</ResponseField>
+
+```javascript
+const journalPath = startJournal(
+  'D:\\KopiaDesk_Backup\\.kopia-data\\journal',
+  [
+    { relativeDest: 'Fotos\\img1.jpg' },
+    { relativeDest: 'Fotos\\img2.jpg' },
+  ]
+);
+// journalPath → 'D:\KopiaDesk_Backup\.kopia-data\journal\backup_2024-01-15T10-29-55-000Z.jsonl'
+```
+
+---
+
+## `appendJournalDone(journalPath, relativeDest)`
+
+Appends a single JSON string line to the journal file immediately after a file is copied. Persisting completions one-by-one (rather than rewriting the whole journal periodically) ensures that only files not yet recorded are treated as partial if an interruption occurs.
+
+### Parameters
+
+<ParamField path="journalPath" type="string" required>
+  The file path returned by `startJournal`.
+</ParamField>
+
+<ParamField path="relativeDest" type="string" required>
+  The relative destination path of the file that was just successfully written
+  (e.g. `'Fotos\\img1.jpg'`).
+</ParamField>
+
+### Return value
+
+<ResponseField name="appendJournalDone" type="void">
+  Returns nothing. Any `fs.appendFileSync` error is silently swallowed — the
+  journal is best-effort and its failure must never abort the backup itself.
+</ResponseField>
+
+```javascript
+// Called once per successfully copied file inside backup:copy-files
+appendJournalDone(journalPath, 'Fotos\\img1.jpg');
+```
+
+---
+
+## `finishJournal(journalPath)`
+
+Deletes the journal file on a clean backup completion. No journal file means no interrupted backup for the next `peekJournals` call to detect.
+
+### Parameters
+
+<ParamField path="journalPath" type="string" required>
+  The file path returned by `startJournal`. If the file no longer exists (e.g.
+  manually deleted), the error is silently ignored.
+</ParamField>
+
+### Return value
+
+<ResponseField name="finishJournal" type="void">
+  Returns nothing.
+</ResponseField>
+
+```javascript
+// Only reached when backup:copy-files completes with zero errors
+finishJournal(journalPath);
+```
+
+<Warning>
+  If `backup:copy-files` returns with a non-zero `errors` count, `finishJournal`
+  is intentionally **not** called. The journal file is left on disk so that
+  `journal:peek` can detect the interrupted state on the next run and
+  `journal:check` can clean up the partial files. Deleting the journal early
+  would hide the corruption from the cleanup pass.
+</Warning>
+
+---
+
+## `peekJournals(journalDirPath)`
+
+Reads all `.jsonl` (and legacy `.json`) files in the journal directory and reports how many files are pending — without deleting or modifying anything. Used by the `journal:peek` IPC channel to build the warning shown to the user before any cleanup is performed.
+
+### Parameters
+
+<ParamField path="journalDirPath" type="string" required>
+  Absolute path to the journal directory. If the directory does not exist,
+  returns zeroed values immediately without throwing.
+</ParamField>
+
+### Return value
+
+<ResponseField name="found" type="number">
+  Number of journal files found (`.jsonl` + `.json`).
+</ResponseField>
+
+<ResponseField name="pendingFiles" type="number">
+  Total number of files across all journals that appear in `planned` but have
+  no corresponding done-line.
+</ResponseField>
+
+<ResponseField name="lastInterruptedAt" type="string | null">
+  ISO 8601 timestamp from the `startedAt` field of the most recently processed
+  journal header, or `null` if no journals were found.
+</ResponseField>
+
+```javascript
+peekJournals('D:\\KopiaDesk_Backup\\.kopia-data\\journal')
+// → { found: 1, pendingFiles: 47, lastInterruptedAt: "2024-01-14T18:22:00.000Z" }
+
+// No journal directory at all → safe zero response
+peekJournals('D:\\KopiaDesk_Backup\\.kopia-data\\journal-nonexistent')
+// → { found: 0, pendingFiles: 0, lastInterruptedAt: null }
+```
+
+---
+
+## `checkJournals(journalDirPath, destRoot)`
+
+Reads all journal files, deletes every pending partial file from the destination root using `safePath` before each `fs.unlinkSync`, and then deletes the journal files themselves. Called only after the user confirms the "Continuar y limpiar" prompt.
+
+### Parameters
+
+<ParamField path="journalDirPath" type="string" required>
+  Absolute path to the journal directory. If the directory does not exist,
+  returns zeroed values without throwing.
+</ParamField>
+
+<ParamField path="destRoot" type="string" required>
+  The backup root directory (e.g. `D:\KopiaDesk_Backup`). Every pending
+  `relativeDest` is resolved with `safePath(destRoot, relativeDest)` before
+  deletion — invalid or escaping paths are silently skipped.
+</ParamField>
+
+### Return value
+
+<ResponseField name="found" type="number">
+  Number of journal files processed.
+</ResponseField>
+
+<ResponseField name="filesCleaned" type="number">
+  Number of partial files successfully deleted from `destRoot`.
+</ResponseField>
+
+<ResponseField name="lastInterruptedAt" type="string | null">
+  ISO 8601 timestamp from the most recently processed journal's `startedAt`
+  field, or `null` if no journals were found.
+</ResponseField>
+
+```javascript
+checkJournals(
+  'D:\\KopiaDesk_Backup\\.kopia-data\\journal',
+  'D:\\KopiaDesk_Backup'
+)
+// → { found: 1, filesCleaned: 1, lastInterruptedAt: "2024-01-14T18:22:00.000Z" }
+```
+
+The test suite demonstrates the precise cleanup boundary — only the file not recorded as done is removed; fully copied files are untouched:
+
+```javascript
+// Tasks: a.txt, sub/b.txt, c.txt
+// Done lines recorded: a.txt, sub/b.txt
+// c.txt was partially written but never recorded → pending
+
+const result = checkJournals(jDir, destRoot);
+result.filesCleaned; // → 1  (only c.txt deleted)
+
+fs.existsSync(path.join(destRoot, 'a.txt'));        // → true  (kept)
+fs.existsSync(path.join(destRoot, 'sub', 'b.txt')); // → true  (kept)
+fs.existsSync(path.join(destRoot, 'c.txt'));         // → false (cleaned)
+fs.readdirSync(jDir).length;                         // → 0    (journal deleted)
+```
+
+<Note>
+  `peekJournals` and `checkJournals` accept the same directory path but have
+  very different effects. `peekJournals` is **read-only** — it never deletes
+  files or journals, and it is safe to call at any time (including at app
+  startup). `checkJournals` performs the **actual cleanup** and should only be
+  called after the user has explicitly confirmed the recovery prompt in the UI.
+  Calling `checkJournals` without user confirmation would silently discard
+  files the user might still want to inspect.
+</Note>

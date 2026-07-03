@@ -1,0 +1,148 @@
+---
+title: "Backup Disk Layout: Files, Manifests, and Metadata"
+sidebarTitle: "Backup Structure"
+description: "The exact directory structure Kopia Desk creates on the destination drive, including backup files, manifests, version history, journal, and log files."
+---
+
+Every backup Kopia Desk writes lands under a single root folder on the destination drive. The backup files themselves sit at the top level of that root, fully visible and accessible in Windows Explorer. All metadata — manifests, version history, journals, the content index, source path memory, and logs — lives inside a hidden subdirectory that Windows Explorer does not show by default. Knowing this layout lets you locate a specific file, understand what each component is for, and make informed decisions before manually modifying the drive.
+
+## Backup Root Directory
+
+Kopia Desk always writes to `<drive>\KopiaDesk_Backup\`. The constant in `main.js` is:
+
+```js
+const BACKUP_ROOT = "KopiaDesk_Backup";
+const METADATA_DIR = ".kopia-data";
+```
+
+These two constants determine every path the application constructs on the destination drive.
+
+## Full Directory Tree
+
+```
+D:\KopiaDesk_Backup\
+├── Fotos\                    ← backup files (visible, mirrors source structure)
+├── Documentos\               ← backup files
+└── .kopia-data\              ← hidden (attrib +h +s)
+    ├── manifests\
+    │   ├── Fotos.json         ← current manifest
+    │   ├── Fotos.prev.json    ← previous manifest (one version back)
+    │   └── Documentos.json
+    ├── versions\              ← gzip-compressed old versions of changed files
+    │   └── 2024-01-15T10-30-00-000Z\
+    │       └── Fotos\
+    │           └── foto.jpg.gz
+    ├── journal\
+    │   └── backup_2024-01-15T10-29-55-000Z.jsonl  ← deleted on clean finish
+    ├── content-index.json     ← deduplication map {sha256 → relPath}
+    ├── sources.json           ← remembered local paths for the Compare tab
+    └── logs\
+        └── Fotos_2024-01-15T10-30-00-000Z.json
+```
+
+<Note>
+  `.kopia-data` is hidden by `hideFolder()`, which calls `attrib +h +s` via `execFile`. Windows Explorer does not display it unless "Show hidden items" is enabled. The folder is still there and is essential to incremental operation — do not delete or rename it manually.
+</Note>
+
+## Component Reference
+
+<CardGroup cols={2}>
+  <Card title="Backup files" icon="folder-open">
+    The source folder's directory structure is mirrored exactly under `KopiaDesk_Backup\<sourceName>\`. If the source was `C:\Users\Ana\Fotos\Vacaciones\foto.jpg`, the backup copy is at `D:\KopiaDesk_Backup\Fotos\Vacaciones\foto.jpg`.
+  </Card>
+  <Card title="manifests\" icon="file-code">
+    One JSON file per source folder. Keyed by relative path; each value holds `{ name, path, size, lastModified, hash }`. Loaded before scan, saved after successful copy.
+  </Card>
+  <Card title=".prev.json" icon="clock-rotate-left">
+    Before overwriting a manifest, the previous version is copied to `<sourceName>.prev.json`. Only one previous snapshot is kept at a time.
+  </Card>
+  <Card title="versions\" icon="box-archive">
+    When versioning is enabled, `backup:copy-versions` gzip-compresses the existing backup copy of a changed file before overwriting it. Files are stored as `<relative_path>.gz` inside a timestamped subfolder named with the backup start time.
+  </Card>
+  <Card title="journal\" icon="scroll">
+    JSONL files tracking in-flight backup operations. Deleted on a clean finish. If one is present when a destination drive is next selected, `journal:peek` surfaces an interrupted-backup warning.
+  </Card>
+  <Card title="content-index.json" icon="fingerprint">
+    Maps SHA-256 hex digest → relative path of the first backup copy. Used by `backup:copy-files` when deduplication is enabled to create NTFS hardlinks instead of copying duplicate content again.
+  </Card>
+</CardGroup>
+
+## Manifests in Detail
+
+A manifest file is a JSON object where each key is the relative path of a backed-up file:
+
+```json
+{
+  "Vacaciones/foto.jpg": {
+    "name": "foto.jpg",
+    "path": "Vacaciones/foto.jpg",
+    "size": 3145728,
+    "lastModified": 1705312200000,
+    "hash": null
+  },
+  "trabajo/informe.pdf": {
+    "name": "informe.pdf",
+    "path": "trabajo/informe.pdf",
+    "size": 204800,
+    "lastModified": 1705400000000,
+    "hash": "a3f1c2d4..."
+  }
+}
+```
+
+`hash` is `null` when deep-verification mode is off. When it is on, the full SHA-256 of the file is stored so the next comparison can detect a content change even if `size` and `lastModified` happen to match.
+
+## Journal Files in Detail
+
+A journal file is a JSONL (newline-delimited JSON) file. The first line is a JSON object:
+
+```json
+{"startedAt":"2024-01-15T10:29:55.000Z","planned":["Vacaciones/foto.jpg","trabajo/informe.pdf"]}
+```
+
+Each subsequent line is a JSON string added by `appendJournalDone` as each file completes:
+
+```
+"Vacaciones/foto.jpg"
+"trabajo/informe.pdf"
+```
+
+On a clean finish `finishJournal` deletes the file with `fs.unlinkSync`. If the process is interrupted, `peekJournals` reads all journal files in the `journal\` directory, diffs `planned` against the completed lines to compute which files are still pending, and returns `{ found, pendingFiles, lastInterruptedAt }` without modifying anything. `checkJournals` performs the same diff and then deletes each pending (partial) file before removing the journal.
+
+## sources.json
+
+`sources.json` maps `sourceName → last known local path` and is updated by the `sources:remember` IPC channel each time a backup completes. The Compare tab reads it via `sources:known-paths` to pre-fill the local folder field so the user does not have to navigate to it again on subsequent sessions.
+
+```json
+{
+  "Fotos": "C:\\Users\\Ana\\Pictures",
+  "Documentos": "C:\\Users\\Ana\\Documents"
+}
+```
+
+## Logs
+
+Each backup operation saves one JSON report to `logs\`. The filename is `<sourceName>_<ISO-timestamp>.json` with colons and dots replaced by hyphens (e.g., `Fotos_2024-01-15T10-30-00-000Z.json`). The log contains the full operation report including counts of copied, deduplicated, and errored files.
+
+## Hidden Folder Behaviour
+
+After saving a manifest, `main.js` calls `hideFolder`:
+
+```js
+// lib/core.js
+async function hideFolder(folderPath) {
+  if (!fs.existsSync(folderPath)) return false;
+  try {
+    await execFileAsync("attrib", ["+h", "+s", folderPath], { timeout: 5000 });
+    return true;
+  } catch {
+    return false;
+  }
+}
+```
+
+`attrib +h +s` sets the Hidden and System attributes on `.kopia-data`. Windows Explorer hides folders with both attributes by default. The `+s` attribute additionally prevents Explorer from indexing the folder contents in its search index.
+
+<Warning>
+  Deleting `.kopia-data` permanently removes all manifests, the content index, all stored source paths, and all journals. On the next backup run Kopia Desk will treat **every file** in every source folder as new and re-copy everything to the destination — the same behaviour as a first-ever backup, but without the benefit of any deduplication data from previous runs.
+</Warning>

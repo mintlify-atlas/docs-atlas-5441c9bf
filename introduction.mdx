@@ -1,0 +1,122 @@
+---
+title: "Kopia Desk: Windows Incremental Backup Desktop App"
+sidebarTitle: "Introduction"
+description: "Kopia Desk is a Windows desktop app for incremental backups to external drives. Copy only what changed, with deduplication, versioning, and crash recovery."
+---
+
+Kopia Desk is a Windows desktop application built on Electron that backs up your folders — Pictures, Documents, Downloads, and more — to an external drive or USB stick. Instead of copying everything every time, it compares the current state of each folder against a manifest saved from the last session and copies only what is new or changed. Deleted files are noted in the manifest but left untouched in the backup, so nothing is silently lost. The result is a plain folder structure on your drive that any Windows PC can read without special software.
+
+## Key Features
+
+<CardGroup cols={2}>
+  <Card title="Incremental Scanning" icon="magnifying-glass">
+    Recursively scans source folders and diffs them against the saved manifest. Uses a fast header+tail hash (64 KB each end) to skip files that only had their timestamp touched, falling back to a full SHA-256 stream when deep verification is enabled.
+  </Card>
+  <Card title="Adaptive Concurrency" icon="bolt">
+    Detects whether the destination is an SSD, HDD, or USB drive via PowerShell and tunes copy parallelism accordingly — up to 8 concurrent writes on NVMe/SSD for small files, down to 1 on spinning HDDs to avoid seek thrashing.
+  </Card>
+  <Card title="Content Deduplication" icon="copy">
+    Maintains a content index (`content-index.json`) keyed by SHA-256 hash. When a file already exists in the backup under any name or folder, Kopia Desk creates an NTFS hardlink instead of a second physical copy, saving space without any external tool.
+  </Card>
+  <Card title="Versioning with Gzip" icon="clock-rotate-left">
+    When versioning is enabled (default on), the previous copy of a changed file is compressed with gzip and stored in `.kopia-data\versions\<date>\` before it is overwritten. Old versions are preserved across sessions.
+  </Card>
+  <Card title="Operation Journal" icon="shield-check">
+    Every backup run writes an append-only JSONL journal. If a power cut or accidental disconnection interrupts the copy, Kopia Desk detects the leftover partial files on the next launch and offers to clean them up before starting a new run.
+  </Card>
+  <Card title="Full SHA-256 Verification" icon="circle-check">
+    An optional deep-hash toggle computes a full SHA-256 over every file in the scan phase, not just the quick header+tail hash. Use it for a thorough integrity check when storage reliability matters more than speed.
+  </Card>
+  <Card title="Compare & Restore Tabs" icon="arrows-rotate">
+    The **Compare** tab finds files present in the backup but missing from your PC and lets you restore only those. The **Restore** tab copies an entire backup folder to any location you choose — useful when the original PC profile no longer exists.
+  </Card>
+  <Card title="Light / Dark Theme" icon="sun">
+    A theme toggle in the top bar switches between light and dark modes. The preference is persisted in `localStorage` across sessions without touching the main process.
+  </Card>
+</CardGroup>
+
+## Configurable Exclusion Filters
+
+Kopia Desk ships with a default set of exclusion patterns that are applied during every recursive scan. You can review and edit them in the sidebar before scanning.
+
+| Default pattern | What it skips |
+|---|---|
+| `Thumbs.db` | Windows thumbnail cache |
+| `desktop.ini` | Folder metadata files |
+| `$RECYCLE.BIN` | Recycle bin directories |
+| `System Volume Information` | Protected system folder |
+| `.git` | Git repository internals |
+| `node_modules` | npm dependency trees |
+| `*.tmp` | Temporary files |
+| `~$*` | Office lock files |
+
+## Technology Stack
+
+Kopia Desk is intentionally lean — there are **no production npm dependencies**. Everything runs on Node.js built-in modules.
+
+| Layer | Technology |
+|---|---|
+| Desktop shell | Electron 43 |
+| Runtime | Node.js ≥ 20 |
+| UI | Vanilla HTML / CSS / JS (no framework) |
+| File I/O & crypto | Node.js `fs`, `crypto`, `zlib` |
+| Drive detection | `child_process` → PowerShell `Get-Volume` / `Get-PhysicalDisk` |
+| Test runner | `node --test` (native, no Jest) |
+
+## Architecture Overview
+
+Kopia Desk follows Electron's three-layer security model strictly — the renderer process never touches the filesystem directly.
+
+```
+┌─────────────────────────────────────────────────────────┐
+│  main.js  (Node.js — full OS access)                    │
+│  ├── lib/core.js  (scan, hash, drives, journal)         │
+│  └── IPC handlers (30+ channels via ipcMain.handle)     │
+├─────────────────────────────────────────────────────────┤
+│  preload.js  (contextBridge — isolated context)         │
+│  └── window.kopiaAPI  (explicit allow-list only)        │
+├─────────────────────────────────────────────────────────┤
+│  renderer/  (no Node access, no nodeIntegration)        │
+│  ├── index.html                                         │
+│  ├── app.js   (UI logic, calls window.kopiaAPI)         │
+│  └── styles.css                                         │
+└─────────────────────────────────────────────────────────┘
+```
+
+- **Main process** (`main.js`) runs with full Node.js access. It imports `lib/core.js` for all scan, hash, drive-detection, and journal logic, then wires each function to an IPC channel.
+- **Renderer process** (`renderer/app.js`) has `nodeIntegration: false` and `contextIsolation: true`. It can only call the functions explicitly listed in `preload.js`.
+- **Preload bridge** (`preload.js`) uses `contextBridge.exposeInMainWorld` to expose `window.kopiaAPI` — the only surface the renderer can reach.
+- **`lib/core.js`** is a pure Node.js module with no Electron dependency, making it directly testable with `node --test`.
+
+## Backup Storage Layout
+
+All backup data lives under a single root on the destination drive. The metadata directory is hidden with Windows `attrib +h +s` so it stays out of the way during normal browsing.
+
+```
+D:\KopiaDesk_Backup\
+├── Pictures\               ← copied files (original structure preserved)
+├── Documents\              ← copied files
+└── .kopia-data\            ← hidden (attrib +h +s)
+    ├── manifests\
+    │   ├── Pictures.json       ← current state
+    │   ├── Pictures.prev.json  ← previous state (one version back)
+    │   └── Documents.json
+    ├── versions\           ← gzip-compressed previous versions
+    ├── journal\            ← append-only JSONL crash-recovery logs
+    └── logs\               ← JSON operation reports
+```
+
+<CardGroup cols={2}>
+  <Card title="Installation" icon="download" href="/installation">
+    Clone the repo, install dependencies with npm, and run the app on Windows.
+  </Card>
+  <Card title="Quickstart" icon="rocket" href="/quickstart">
+    Back up your first folder in five minutes with a step-by-step walkthrough.
+  </Card>
+  <Card title="Backup Features" icon="hard-drive" href="/features/backup">
+    Deep dive into incremental diffing, deduplication, versioning, and concurrency.
+  </Card>
+  <Card title="API Overview" icon="code" href="/api/overview">
+    Reference for every IPC channel exposed by the main process.
+  </Card>
+</CardGroup>

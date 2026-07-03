@@ -1,0 +1,91 @@
+---
+title: "Compare: Restore Only Missing Files from Backup"
+sidebarTitle: "Compare"
+description: "The Compare tab scans your backup against a local folder and restores only the files that are missing from your PC, plus flags files lost from the backup itself."
+---
+
+The Compare tab is a targeted restore tool. Instead of copying everything, it scans a backed-up folder against a local folder on your PC and shows you only the files that are missing — useful when you accidentally deleted a file or folder and want to recover just those items without touching anything else.
+
+## How It Works
+
+<Steps>
+  <Step title="Switch to the Compare tab">
+    Click the **Comparar** tab in the top bar of the main panel. The view shows a checklist of backed-up folders on the selected drive.
+  </Step>
+  <Step title="Select the backup drive">
+    Choose the drive that holds your backup from the destination dropdown in the sidebar. The Compare panel will populate with the available backup folders from that drive.
+  </Step>
+  <Step title="Mark folders to compare">
+    Use the checkboxes to select which backed-up folders you want to compare. Only the folders you mark will be scanned — nothing runs automatically.
+  </Step>
+  <Step title="Confirm local folder paths">
+    Kopia Desk calls `sources:known-paths` (`knownSourcePaths`) to check whether a local path was remembered from a previous compare session. If a path is known, it is pre-filled. If not, you will be prompted with a folder dialog to select the local folder that corresponds to the backed-up one.
+  </Step>
+  <Step title="Run the comparison">
+    Click **Comparar seleccionados**. For each marked folder, `restore:scan` reads the manifest, scans the local folder (applying the same default exclusion filters as backup), and classifies every manifest entry:
+
+    - **`missing`** — in the manifest and physically present on the backup drive, but absent from the local folder.
+    - **`lostFromBackup`** — in the manifest but the file no longer exists on the backup drive (deleted manually, drive corruption, etc.).
+    - **`totalChecked`** — total number of manifest entries examined.
+  </Step>
+  <Step title="Monitor scan progress">
+    Progress is emitted every 50 files during the scan:
+
+    ```js
+    {
+      phase: "restore-scan",
+      current: number,   // manifest entries checked so far
+      total: number,     // total manifest entries
+      file: string,      // relative path being checked
+      percent: number    // 0–100
+    }
+    ```
+  </Step>
+  <Step title="Review and select files to restore">
+    The results panel shows the `missing` files grouped by folder. Select which files you want to recover — you can pick individual files or the entire list.
+  </Step>
+  <Step title="Restore selected files">
+    `restore:copy-files` copies the selected files from `backupFullPath` back to the local folder, preserving the original relative path. Progress events with `phase: "restore"` are emitted as each file completes.
+  </Step>
+  <Step title="Remember the local path">
+    After a successful compare, `sources:remember` (`rememberSourcePath`) saves the local folder path to `.kopia-data/sources.json` on the backup drive. The next time you compare that folder on this PC, the path will be pre-filled automatically.
+  </Step>
+</Steps>
+
+---
+
+## `lostFromBackup` Detection
+
+Files listed under `lostFromBackup` appear in the manifest but are no longer physically present on the backup drive. Common causes include manually deleting files from the backup folder, drive corruption, or a previous interrupted backup that was never cleaned up.
+
+<Note>
+  If you see files listed as lost from backup and do not clear them from the manifest, the next backup scan will still mark them as "already backed up." This means they will not be re-copied from the source, and the gap in your backup will persist silently. Use the option to remove them from the manifest so the next backup re-copies them.
+</Note>
+
+The UI offers two actions when `lostFromBackup` entries are found:
+
+- **Remove from manifest** — deletes the entries from the manifest so the next backup scan treats them as new files and re-copies them from the source.
+- **Ignore** — leaves the manifest unchanged. The entries will appear again on the next compare.
+
+---
+
+## Compare vs. Restore
+
+| | Compare | Restore |
+|---|---|---|
+| What it copies | Only files missing from the local folder | All files in the backup folder |
+| Requires an existing local folder | Yes | No |
+| Detects `lostFromBackup` | Yes | No |
+| Best use case | Accidental deletion recovery | After format or new PC |
+
+For recovering an entire folder when the original path no longer exists, see the [Restore](./restore) page.
+
+---
+
+## Remembered Paths
+
+`rememberSourcePath` writes to `.kopia-data/sources.json` on the backup drive itself. This means the remembered mapping travels with the backup drive, not with any particular PC.
+
+<Tip>
+  Because `sources.json` lives on the backup drive, remembered paths are tied to the machine where the compare was first run. If you plug the drive into a different PC where the local paths are different, the saved paths will not match and you will be prompted to select the local folder again. The new path is then saved for that machine's next session.
+</Tip>

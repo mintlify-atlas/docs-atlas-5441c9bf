@@ -1,0 +1,206 @@
+---
+title: "Manifests, Source Paths, and Settings IPC Reference"
+sidebarTitle: "Manifests & Settings"
+description: "window.kopiaAPI methods for loading and saving backup manifests, remembering source folder paths for the Compare tab, and persisting user settings."
+---
+
+Kopia Desk stores three kinds of persistent data: backup manifests that record the exact state of each source folder after every run, a `sources.json` file that remembers which local path corresponds to each backed-up folder, and a `kopia-desk-settings.json` file that holds the user's UI preferences. All three are read and written through IPC so the renderer never touches the file system directly.
+
+---
+
+## `loadManifest(destRoot, sourceName)`
+
+Reads the manifest JSON for `sourceName` from the backup drive. If the file does not exist—for example on the very first backup of a folder—returns an empty object so the caller can treat every scanned file as new without needing a special code path.
+
+**Manifest path:** `<destRoot>/KopiaDesk_Backup/.kopia-data/manifests/<safeName(sourceName)>.json`
+
+<ParamField path="destRoot" type="string" required>
+  Root of the destination drive, e.g. `"E:\\"`.
+</ParamField>
+
+<ParamField path="sourceName" type="string" required>
+  Human-readable source folder name. Sanitised through `safeName()` (illegal filename characters replaced with `_`, maximum 120 characters) before use in the file path.
+</ParamField>
+
+**Returns:** `Promise<ManifestMap>` where `ManifestMap = { [relativePath: string]: FileEntry }`
+
+Returns `{}` in two cases: the manifest file does not exist, or the file exists but cannot be parsed as valid JSON (treated as no prior backup rather than a hard error).
+
+<ResponseField name="[relativePath]" type="FileEntry" required>
+  Each key is a file path relative to the backed-up source root. See [`scanDirectory()`](/api/scanning-and-hashing#scandirectory-dirpath-excludepatterns) for the full `FileEntry` field list.
+</ResponseField>
+
+```javascript
+const manifest = await window.kopiaAPI.loadManifest('E:\\', 'Pictures');
+// {} on first backup, or:
+// {
+//   'vacation/beach.jpg': { name: 'beach.jpg', size: 2048000, lastModified: 1700000000000, hash: null, ... },
+//   ...
+// }
+```
+
+---
+
+## `saveManifest(destRoot, sourceName, manifest)`
+
+Writes `manifest` as formatted JSON to the manifest file path. Before overwriting, if a manifest already exists on disk it is copied to `<name>.prev.json` so there is always one prior version available. After writing, `hideFolder` runs `attrib +h +s` on `.kopia-data` to keep the metadata directory hidden from Windows Explorer.
+
+<ParamField path="destRoot" type="string" required>
+  Root of the destination drive.
+</ParamField>
+
+<ParamField path="sourceName" type="string" required>
+  Source folder name. Sanitised through `safeName()` before use in the path.
+</ParamField>
+
+<ParamField path="manifest" type="ManifestMap" required>
+  The full current-state manifest to persist. Typically assembled by `renderer/app.js` after merging the scan results with the previous manifest.
+</ParamField>
+
+**Returns:** `Promise<{ ok: true }>`
+
+<ResponseField name="ok" type="true" required>
+  Always `true` on success. The method throws on any file-system error.
+</ResponseField>
+
+```javascript
+await window.kopiaAPI.saveManifest('E:\\', 'Pictures', updatedManifest);
+// { ok: true }
+// Previous manifest is now at:
+// E:\KopiaDesk_Backup\.kopia-data\manifests\Pictures.prev.json
+```
+
+---
+
+## `rememberSourcePath(destRoot, sourceName, sourcePath)`
+
+Merges a single `sourceName → sourcePath` entry into `sources.json` on the backup drive. If `sources.json` already exists its contents are loaded, the new entry is merged in, and the updated object is written back—existing entries for other source names are preserved.
+
+**Storage path:** `<destRoot>/KopiaDesk_Backup/.kopia-data/sources.json`
+
+<ParamField path="destRoot" type="string" required>
+  Root of the destination drive.
+</ParamField>
+
+<ParamField path="sourceName" type="string" required>
+  The backed-up folder name used as the map key.
+</ParamField>
+
+<ParamField path="sourcePath" type="string" required>
+  The absolute local path to remember, e.g. `"C:\\Users\\User\\Pictures"`.
+</ParamField>
+
+**Returns:** `Promise<{ ok: true }>`
+
+```javascript
+await window.kopiaAPI.rememberSourcePath('E:\\', 'Pictures', 'C:\\Users\\User\\Pictures');
+// { ok: true }
+```
+
+---
+
+## `knownSourcePaths(destRoot)`
+
+Reads `sources.json` from the backup drive and returns the full map of every remembered `sourceName → localPath` pair. The Compare tab uses this to pre-fill the local folder field when the user selects a backed-up folder.
+
+<ParamField path="destRoot" type="string" required>
+  Root of the destination drive.
+</ParamField>
+
+**Returns:** `Promise<{ [sourceName: string]: string }>` — map of source names to their last-known local paths. Returns `{}` when `sources.json` does not exist or fails to parse.
+
+```javascript
+const paths = await window.kopiaAPI.knownSourcePaths('E:\\');
+// { 'Pictures': 'C:\\Users\\User\\Pictures', 'Documents': 'C:\\Users\\User\\Documents' }
+```
+
+---
+
+## `loadSettings()`
+
+Reads the user's persistent settings from Electron's `userData` directory. The `userData` path is managed by Electron and resolves to something like `C:\Users\<user>\AppData\Roaming\kopia-desk` on a typical Windows installation.
+
+**Settings file path:** `<app.getPath('userData')>/kopia-desk-settings.json`
+
+**Parameters:** none
+
+**Returns:** `Promise<object>` — the parsed settings object, or `{}` if the file does not exist or fails to parse.
+
+```javascript
+const settings = await window.kopiaAPI.loadSettings();
+// { versioning: true, deepHash: false, dedup: false, showAdvanced: false }
+// or {} on first launch
+```
+
+---
+
+## `saveSettings(settings)`
+
+Overwrites `kopia-desk-settings.json` with the provided object, serialised as formatted JSON. There is no merge—the entire file is replaced.
+
+<ParamField path="settings" type="object" required>
+  Any JSON-serialisable object. The application currently uses the following keys, though the IPC handler imposes no schema:
+
+  | Key | Type | Description |
+  |---|---|---|
+  | `versioning` | `boolean` | Save compressed previous versions of changed files |
+  | `deepHash` | `boolean` | Compute full SHA-256 of each file for change detection |
+  | `dedup` | `boolean` | Deduplicate identical files via NTFS hard links |
+  | `showAdvanced` | `boolean` | Show the advanced options panel in the UI |
+</ParamField>
+
+**Returns:** `Promise<{ ok: true }>`
+
+```javascript
+await window.kopiaAPI.saveSettings({
+  versioning: true,
+  deepHash: false,
+  dedup: false,
+  showAdvanced: false
+});
+// { ok: true }
+```
+
+---
+
+## `onProgress(callback)`
+
+Subscribes to real-time progress events emitted by `backupCopyFiles()`, `restoreCopyFiles()`, and `restoreScan()`. Under the hood, `preload.js` attaches a listener on the `"progress"` IPC channel with `ipcRenderer.on` and returns a cleanup function that calls `ipcRenderer.removeListener` when invoked.
+
+<ParamField path="callback" type="(data: ProgressEvent) => void" required>
+  Function called once per progress event. Receives a single `ProgressEvent` object.
+
+  <Expandable title="ProgressEvent fields">
+    <ResponseField name="phase" type='"backup" | "restore" | "restore-scan"' required>
+      Identifies which operation is in progress.
+    </ResponseField>
+    <ResponseField name="current" type="number" required>
+      Number of files processed so far in this operation.
+    </ResponseField>
+    <ResponseField name="total" type="number" required>
+      Total number of files in this operation.
+    </ResponseField>
+    <ResponseField name="file" type="string" required>
+      Relative path of the file just processed.
+    </ResponseField>
+    <ResponseField name="percent" type="number" required>
+      Integer percentage: `Math.round((current / total) * 100)`.
+    </ResponseField>
+  </Expandable>
+</ParamField>
+
+**Returns:** `() => void` — call this function to unsubscribe the listener.
+
+```javascript
+const off = window.kopiaAPI.onProgress((event) => {
+  console.log(`[${event.phase}] ${event.percent}% — ${event.file}`);
+});
+
+await window.kopiaAPI.backupCopyFiles(tasks, { concurrency: 4 });
+
+off(); // removes the listener
+```
+
+<Note>
+  A single `onProgress` subscription receives events from all three phases (`backup`, `restore`, `restore-scan`). Use the `phase` field to dispatch to the correct UI element when multiple operations could theoretically be in flight.
+</Note>

@@ -1,0 +1,146 @@
+---
+title: "Drives and Folders IPC: List, Select, and Quick Access"
+sidebarTitle: "Drives & Folders"
+description: "window.kopiaAPI methods for listing connected drives, opening native folder dialogs, and retrieving the user's standard folders that exist on this PC."
+---
+
+Before a backup or restore operation can begin, the UI needs to know which drives are available and where the user wants to work. These four methods handle all drive enumeration and folder selection. Drive data comes from PowerShell's `Get-Volume` cmdlet so it reflects the live state of the system; folder dialogs delegate to Electron's native `dialog.showOpenDialog` so the user gets the standard Windows file picker.
+
+---
+
+## `listDrives()`
+
+Returns a list of every volume that has a drive letter, together with its label and space figures. The underlying PowerShell command is:
+
+```
+Get-Volume | Where-Object { $_.DriveLetter } | Select-Object DriveLetter, FileSystemLabel, SizeRemaining, Size | ConvertTo-Json -Compress
+```
+
+If PowerShell times out or throws, the method returns an empty array rather than rejecting—the UI can still function and the user can retry.
+
+**Parameters:** none
+
+**Returns:** `Promise<DriveInfo[]>`
+
+<ResponseField name="root" type="string" required>
+  Drive root path, e.g. `"E:\\"`. Formed as `DriveLetter + ":\\"`.
+</ResponseField>
+
+<ResponseField name="label" type="string" required>
+  Volume label from `FileSystemLabel`. Empty string `""` when the volume has no label.
+</ResponseField>
+
+<ResponseField name="free" type="number" required>
+  Bytes of free space (`SizeRemaining`). `0` if PowerShell reports no value.
+</ResponseField>
+
+<ResponseField name="total" type="number" required>
+  Total volume capacity in bytes (`Size`). `0` if PowerShell reports no value.
+</ResponseField>
+
+<ResponseField name="isSystemDrive" type="boolean" required>
+  `true` when this drive letter matches `process.env.SystemDrive` (e.g. `"C:"`). Used by the UI to visually distinguish the system drive from external targets.
+</ResponseField>
+
+```javascript
+const drives = await window.kopiaAPI.listDrives();
+// [
+//   { root: 'C:\\', label: 'Windows', free: 45000000000, total: 256000000000, isSystemDrive: true },
+//   { root: 'E:\\', label: 'MyUSB',   free: 32000000000, total: 64000000000,  isSystemDrive: false }
+// ]
+```
+
+<Note>
+  `listDrives()` returns `[]`—never rejects—when PowerShell is unavailable or returns an error. Always check the array length before rendering drive selection UI.
+</Note>
+
+---
+
+## `selectFolder()`
+
+Opens Electron's native `dialog.showOpenDialog` configured for directory selection. The dialog title is `"Seleccionar carpeta de origen"`. Returns the path the user chose, or `null` if the dialog was cancelled.
+
+**Parameters:** none
+
+**Returns:** `Promise<string | null>`
+
+<ResponseField name="(return value)" type="string | null" required>
+  Absolute path to the selected directory (e.g. `"C:\\Users\\User\\Pictures"`), or `null` when the user closes the dialog without choosing a folder.
+</ResponseField>
+
+```javascript
+const folderPath = await window.kopiaAPI.selectFolder();
+if (folderPath) {
+  console.log('Source folder selected:', folderPath);
+} else {
+  console.log('Dialog was cancelled');
+}
+```
+
+---
+
+## `selectRestoreTarget()`
+
+Identical to `selectFolder()` except the dialog title is `"Seleccionar carpeta destino para restaurar"`, making its purpose clear to the user when restoring files. Returns the path of the chosen destination folder, or `null` if cancelled.
+
+**Parameters:** none
+
+**Returns:** `Promise<string | null>`
+
+<ResponseField name="(return value)" type="string | null" required>
+  Absolute path to the selected restore destination, or `null` if the dialog was cancelled.
+</ResponseField>
+
+```javascript
+const targetPath = await window.kopiaAPI.selectRestoreTarget();
+if (targetPath) {
+  console.log('Restore destination:', targetPath);
+}
+```
+
+<Note>
+  Both `selectFolder()` and `selectRestoreTarget()` use the `openDirectory` property of `dialog.showOpenDialog`—file selection is not possible through either method.
+</Note>
+
+---
+
+## `quickFolders()`
+
+Returns the user's standard Windows folders so the UI can offer one-click shortcuts instead of requiring navigation through the folder dialog. The method iterates a fixed list of Electron `app.getPath` keys and filters out any folder that does not actually exist on the current machine via `fs.existsSync`.
+
+The full candidate list, in order:
+
+| `app.getPath` key | Display name |
+|---|---|
+| `pictures` | Imágenes |
+| `documents` | Documentos |
+| `downloads` | Descargas |
+| `music` | Música |
+| `videos` | Videos |
+| `desktop` | Escritorio |
+
+**Parameters:** none
+
+**Returns:** `Promise<QuickFolder[]>`
+
+<ResponseField name="name" type="string" required>
+  Human-readable display name in Spanish (e.g. `"Imágenes"`).
+</ResponseField>
+
+<ResponseField name="path" type="string" required>
+  Absolute path to the folder as returned by `app.getPath`, e.g. `"C:\\Users\\User\\Pictures"`.
+</ResponseField>
+
+```javascript
+const folders = await window.kopiaAPI.quickFolders();
+// [
+//   { name: 'Imágenes',    path: 'C:\\Users\\User\\Pictures'  },
+//   { name: 'Documentos',  path: 'C:\\Users\\User\\Documents' },
+//   { name: 'Descargas',   path: 'C:\\Users\\User\\Downloads' },
+//   { name: 'Escritorio',  path: 'C:\\Users\\User\\Desktop'   }
+// ]
+```
+
+<Note>
+  Folders that do not exist (e.g. `Music` on a PC that has never had a `Music` directory) are silently omitted. If `app.getPath` throws for a given key, that entry is also skipped. The returned array can therefore be shorter than six items.
+</Note>

@@ -1,0 +1,150 @@
+---
+title: "Scanning and Hashing IPC: Files, Exclusions, and Checksums"
+sidebarTitle: "Scanning & Hashing"
+description: "window.kopiaAPI methods for recursively scanning directories, retrieving default exclusion patterns, and computing full or quick SHA-256 file hashes."
+---
+
+Scanning and hashing are the two steps that let Kopia Desk decide which files need to be copied on any given backup run. Scanning builds a flat map of every file under a directory, and hashing verifies whether a file's content has actually changed since the last backup. Both operations live in `lib/core.js` so they can be tested without Electron; `main.js` registers each one as an IPC handler and delegates to the core functions directly.
+
+All scan and hash operations use `fs.promises` (async I/O) instead of synchronous equivalents, so the Electron main process—and therefore the UI window—stays responsive even while traversing large directory trees or reading multi-gigabyte files.
+
+---
+
+## `scanDirectory(dirPath, excludePatterns)`
+
+Recursively walks `dirPath` and returns a flat map of every reachable file, keyed by its path relative to `dirPath`. Directories and files whose names match any pattern in `excludePatterns` are skipped entirely (including their contents). Entries inside protected Windows folders (`EPERM`) are silently omitted rather than causing the whole scan to fail.
+
+<ParamField path="dirPath" type="string" required>
+  Absolute path to the directory to scan. The IPC handler checks `fs.existsSync(dirPath)` before calling into `lib/core.js` and throws `"La carpeta no existe: <dirPath>"` if the directory is not present.
+</ParamField>
+
+<ParamField path="excludePatterns" type="string[]">
+  Glob-style patterns (supporting `*` and `?`) matched case-insensitively against each entry's name. Defaults to `DEFAULT_EXCLUDES` when omitted or empty. See [`defaultExcludePatterns()`](#defaultexcludepatterns) for the full list.
+</ParamField>
+
+**Returns:** `Promise<FileMap>` where `FileMap = { [relativePath: string]: FileEntry }`
+
+<ResponseField name="[relativePath]" type="FileEntry" required>
+  Each key is the file's path relative to `dirPath`, using forward-slash separators (e.g. `"vacation/beach.jpg"`).
+
+  <Expandable title="FileEntry fields">
+    <ResponseField name="name" type="string" required>
+      The file's base name, e.g. `"beach.jpg"`.
+    </ResponseField>
+    <ResponseField name="path" type="string" required>
+      Same as the map key — the relative path from the scanned root.
+    </ResponseField>
+    <ResponseField name="fullPath" type="string" required>
+      Absolute path on the local file system.
+    </ResponseField>
+    <ResponseField name="size" type="number" required>
+      File size in bytes from `fs.promises.stat`.
+    </ResponseField>
+    <ResponseField name="lastModified" type="number" required>
+      Last-modified timestamp in milliseconds since Unix epoch (`stat.mtimeMs`).
+    </ResponseField>
+    <ResponseField name="hash" type="null" required>
+      Always `null` at scan time. Populated later by `hashFile()` or `quickHashFile()` if the user enables deep verification.
+    </ResponseField>
+  </Expandable>
+</ResponseField>
+
+```javascript
+const files = await window.kopiaAPI.scanDirectory(
+  'C:\\Users\\User\\Pictures',
+  ['*.tmp', 'Thumbs.db']
+);
+// {
+//   'vacation/beach.jpg': {
+//     name: 'beach.jpg',
+//     path: 'vacation/beach.jpg',
+//     fullPath: 'C:\\Users\\User\\Pictures\\vacation\\beach.jpg',
+//     size: 2048000,
+//     lastModified: 1700000000000,
+//     hash: null
+//   },
+//   ...
+// }
+```
+
+---
+
+## `defaultExcludePatterns()`
+
+Returns the `DEFAULT_EXCLUDES` constant exported by `lib/core.js`. The UI uses this to pre-populate the exclusion list shown to the user before a backup run.
+
+**Parameters:** none
+
+**Returns:** `Promise<string[]>`
+
+The array returned is always:
+
+```javascript
+[
+  'Thumbs.db',
+  'desktop.ini',
+  '$RECYCLE.BIN',
+  'System Volume Information',
+  '.git',
+  'node_modules',
+  '*.tmp',
+  '~$*'
+]
+```
+
+Patterns support `*` (any sequence of characters) and `?` (any single character). Matching is case-insensitive. Pass this array—or a modified copy—as `excludePatterns` to `scanDirectory()`.
+
+---
+
+## `hashFile(filePath)`
+
+Computes the full SHA-256 digest of a file by streaming its entire content through Node's `crypto.createHash`. This is the accurate hash used when the user enables the "deep verification" option; it is slower than `quickHashFile()` for large files but guarantees that even a single changed byte is detected.
+
+<ParamField path="filePath" type="string" required>
+  Absolute path to the file to hash.
+</ParamField>
+
+**Returns:** `Promise<string>` — lowercase hexadecimal SHA-256 digest (64 characters).
+
+```javascript
+const hash = await window.kopiaAPI.hashFile('C:\\Users\\User\\Pictures\\photo.jpg');
+// 'e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855'
+```
+
+<Warning>
+  `hashFile()` reads the complete file content. For multi-gigabyte files (videos, disk images) use `quickHashFile()` during change-detection loops and reserve `hashFile()` for final integrity checks.
+</Warning>
+
+---
+
+## `quickHashFile(filePath, size)`
+
+Produces a SHA-256 digest from only the first and last 64 KB of the file, with the file size encoded as a string prefix in the hash input. This makes the hash sensitive to size changes, header/trailer changes, and most content edits, while reading at most 128 KB per file regardless of total size.
+
+The exact algorithm in `lib/core.js`:
+1. Hash input is initialised with `String(size)` as a prefix.
+2. Read up to `CHUNK` (65 536) bytes from offset 0 (the head).
+3. If `size > CHUNK`, also read up to `CHUNK` bytes from offset `size - CHUNK` (the tail).
+4. Return `hash.digest('hex')`.
+
+<ParamField path="filePath" type="string" required>
+  Absolute path to the file to hash.
+</ParamField>
+
+<ParamField path="size" type="number" required>
+  File size in bytes. Must match the actual file size; it is included in the hash computation so that two files with identical head+tail but different lengths produce different digests.
+</ParamField>
+
+**Returns:** `Promise<string>` — lowercase hexadecimal SHA-256 digest (64 characters).
+
+```javascript
+const hash = await window.kopiaAPI.quickHashFile(
+  'C:\\Users\\User\\Photos\\video.mp4',
+  1073741824 // 1 GB
+);
+// computed from: String(1073741824) + first-64KB + last-64KB
+```
+
+<Note>
+  `quickHashFile()` uses `fs.promises.open` and positional reads (async I/O) rather than synchronous equivalents, so it does not block the Electron main process while reading large files.
+</Note>

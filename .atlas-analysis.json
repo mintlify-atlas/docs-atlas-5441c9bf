@@ -1,0 +1,134 @@
+{
+  "projectType": "saas",
+  "projectName": "Kopia Desk",
+  "projectDescription": "A Windows desktop application for incremental backups of local folders to external drives or USB sticks, built with Electron.",
+  "theme": "palm",
+  "primaryColor": "#0f6fbd",
+  "lightColor": "#1f8a59",
+  "darkColor": "#0b4675",
+  "navigation": {
+    "tabs": [
+      {
+        "tab": "Documentation",
+        "groups": [
+          {
+            "group": "Getting Started",
+            "pages": [
+              "introduction",
+              "installation",
+              "quickstart"
+            ]
+          },
+          {
+            "group": "Core Features",
+            "pages": [
+              "features/backup",
+              "features/restore",
+              "features/compare",
+              "features/options"
+            ]
+          },
+          {
+            "group": "Under the Hood",
+            "pages": [
+              "internals/architecture",
+              "internals/incremental-engine",
+              "internals/security",
+              "internals/backup-structure"
+            ]
+          },
+          {
+            "group": "Development",
+            "pages": [
+              "development/setup",
+              "development/testing",
+              "development/building"
+            ]
+          }
+        ]
+      },
+      {
+        "tab": "API Reference",
+        "groups": [
+          {
+            "group": "IPC Channels",
+            "pages": [
+              "api/overview",
+              "api/drives-and-folders",
+              "api/scanning-and-hashing",
+              "api/backup-operations",
+              "api/restore-operations",
+              "api/manifest-and-settings"
+            ]
+          },
+          {
+            "group": "Core Library",
+            "pages": [
+              "api/core/path-safety",
+              "api/core/exclusion-filters",
+              "api/core/journal"
+            ]
+          }
+        ]
+      }
+    ]
+  },
+  "keyFeatures": [
+    "Incremental backup using manifests — only new and changed files are copied",
+    "Quick hash (header+tail 64 KB) for fast change detection without full file reads",
+    "Adaptive copy concurrency based on detected drive type (SSD / HDD / USB)",
+    "Content-level deduplication via NTFS hardlinks and a content-index",
+    "Optional versioning: previous revisions of changed files compressed with gzip",
+    "Optional deep verification with full SHA-256 checksums",
+    "Operation journal: detects interrupted backups and cleans up partial files",
+    "Compare tab: finds files missing from the PC and restores only those",
+    "Restore tab: full folder restore to any location, without needing the original path",
+    "Automatic name disambiguation for source folders sharing the same base name",
+    "Light/dark theme with persistent preference",
+    "Configurable exclusion filters (Thumbs.db, node_modules, *.tmp, etc.)",
+    "Secure Electron architecture: contextIsolation, no nodeIntegration, path traversal protection"
+  ],
+  "publicApiSurface": [
+    "window.kopiaAPI.listDrives()",
+    "window.kopiaAPI.selectFolder()",
+    "window.kopiaAPI.selectRestoreTarget()",
+    "window.kopiaAPI.quickFolders()",
+    "window.kopiaAPI.scanDirectory(dirPath, excludePatterns)",
+    "window.kopiaAPI.defaultExcludePatterns()",
+    "window.kopiaAPI.hashFile(filePath)",
+    "window.kopiaAPI.quickHashFile(filePath, size)",
+    "window.kopiaAPI.loadManifest(destRoot, sourceName)",
+    "window.kopiaAPI.saveManifest(destRoot, sourceName, manifest)",
+    "window.kopiaAPI.rememberSourcePath(destRoot, sourceName, sourcePath)",
+    "window.kopiaAPI.knownSourcePaths(destRoot)",
+    "window.kopiaAPI.planConcurrency(driveRoot, avgFileSize)",
+    "window.kopiaAPI.journalPeek(destRoot)",
+    "window.kopiaAPI.journalCheck(destRoot)",
+    "window.kopiaAPI.backupCopyFiles(tasks, options)",
+    "window.kopiaAPI.backupCopyVersions(tasks)",
+    "window.kopiaAPI.logSave(destRoot, sourceName, report)",
+    "window.kopiaAPI.restoreListSources(backupDrive)",
+    "window.kopiaAPI.restoreFullList(backupDrive, sourceName)",
+    "window.kopiaAPI.restoreScan(backupDrive, sourceName, localPath)",
+    "window.kopiaAPI.restoreCopyFiles(files, targetDir, options)",
+    "window.kopiaAPI.loadSettings()",
+    "window.kopiaAPI.saveSettings(settings)",
+    "window.kopiaAPI.onProgress(callback)",
+    "core.safeName(name)",
+    "core.safePath(root, relativePath)",
+    "core.compileExcludePatterns(patterns)",
+    "core.isExcluded(name, compiledPatterns)",
+    "core.scanDirectoryRecursive(dirPath, basePath, compiledExcludes)",
+    "core.hashFileAsync(filePath)",
+    "core.quickHashFile(fullPath, size)",
+    "core.listDrives()",
+    "core.detectDriveType(driveRoot)",
+    "core.pickConcurrency(driveInfo, avgFileSize)",
+    "core.startJournal(journalDirPath, tasks)",
+    "core.appendJournalDone(journalPath, relativeDest)",
+    "core.finishJournal(journalPath)",
+    "core.peekJournals(journalDirPath)",
+    "core.checkJournals(journalDirPath, destRoot)",
+    "core.hideFolder(folderPath)"
+  ]
+}

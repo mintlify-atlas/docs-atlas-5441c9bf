@@ -1,0 +1,148 @@
+---
+title: "Incremental Backup: Scan, Diff, and Copy"
+sidebarTitle: "Backup"
+description: "How Kopia Desk scans source folders, compares against the saved manifest, and copies only new and changed files to the destination drive with adaptive concurrency."
+---
+
+Kopia Desk's backup feature compares every source file against a saved manifest to determine exactly which files are new, changed, or deleted — then copies only what needs to change. Nothing is transferred blindly: each run builds on the previous result, so even large folders with thousands of files can be backed up in seconds when little has changed.
+
+## The Backup Workflow
+
+<Steps>
+  <Step title="Scan source folders">
+    Click **Escanear cambios** in the sidebar. Kopia Desk calls `fs:scan-directory` for each source folder, recursively walking the directory tree with `scanDirectoryRecursive`. Excluded names (see [Exclusion Filters](#exclusion-filters) below) are skipped. Each discovered file is recorded with its relative path, size, and last-modified time.
+  </Step>
+  <Step title="Load the previous manifest">
+    For each source folder, the app calls `manifest:load`, reading `.kopia-data/manifests/<sourceName>.json` from the destination drive. This JSON file maps every relative path to the file metadata captured during the previous run. On a first run, no manifest exists yet and the file returns an empty object.
+
+    <Note>
+      On the very first backup of a folder, there is no manifest yet, so every scanned file is treated as new. The full folder is copied and a fresh manifest is written at the end.
+    </Note>
+  </Step>
+  <Step title="Diff: classify every file">
+    The renderer compares the live scan against the manifest and places each file into one of three buckets:
+
+    - **New** — present in the current scan but absent from the manifest.
+    - **Changed** — present in both, but size or `mtime` differ. If deep verification is enabled, a full SHA-256 hash is also compared (see [Change Detection](#change-detection)).
+    - **Deleted** — present in the manifest but no longer found in the source folder. The file still exists in the backup; this category only updates the manifest record.
+  </Step>
+  <Step title="Review the folder cards">
+    The main panel shows one card per source folder, each displaying badges with the count of new, changed, and deleted files. Three checkboxes let you accept or skip each category independently — for example, you can copy new files while skipping changed ones.
+  </Step>
+  <Step title="Verify free space">
+    As you check and uncheck categories, Kopia Desk recalculates the total size of accepted files and compares it against the available space on the destination drive (reported by `drives:list` via PowerShell `Get-Volume`). If the selected files exceed available space, the copy button is disabled and a warning banner shows exactly how much additional space is needed.
+  </Step>
+  <Step title="Copy accepted files">
+    Click **Copiar aceptados**. The app calls `backup:copy-files` with the list of accepted tasks, a concurrency value determined by `backup:plan-concurrency`, and the current deduplication and versioning settings. A progress bar updates in real time as each file completes.
+
+    <Tip>
+      If a backup is interrupted mid-copy (power loss, drive disconnected), a journal file is left on the destination drive. The next time you select that destination, Kopia Desk detects the partial backup with `journal:peek`, shows a notice explaining what happened, and offers **Continuar y limpiar** to delete the incomplete files before the next run.
+    </Tip>
+  </Step>
+  <Step title="Save the manifest">
+    After all copies complete, the app calls `manifest:save`. The previous manifest is preserved as `<sourceName>.prev.json` before the new one is written. The `.kopia-data` folder is then hidden using Windows `attrib +h +s` so it stays invisible to normal file browsers.
+  </Step>
+</Steps>
+
+---
+
+## Change Detection
+
+Kopia Desk offers two strategies for deciding whether a file has actually changed. You can switch between them with the **Verificación profunda** toggle in the Options section.
+
+### Quick hash (default)
+
+`quickHashFile` opens the file and reads only the **first and last 64 KB**, then produces a SHA-256 digest prefixed with the file size. This avoids re-copying files whose content is unchanged but whose timestamp was updated by another program. The operation is async (`fs.promises`) so it never blocks the Electron main process while hashing many files.
+
+**Limitation:** a content change buried in the middle of a very large file (and not reflected in its size) will not be detected. This is rare in practice.
+
+### Deep hash
+
+`hashFileAsync` streams the **entire file** through SHA-256. It is slower for large files but catches any content change regardless of where it occurs. Enabled with the **Verificación profunda** toggle.
+
+---
+
+## Adaptive Concurrency
+
+Before copying, `backup:plan-concurrency` calls `detectDriveType`, which queries PowerShell for the `MediaType` and `BusType` of the destination drive. The result is passed to `pickConcurrency` together with the average file size of the task list:
+
+| Drive type | Many small files (avg < 2 MB) | Large files |
+|---|---|---|
+| HDD (spinning) | 2 concurrent copies | 1 concurrent copy |
+| SSD / NVMe | 8 concurrent copies | 4 concurrent copies |
+| Unknown / USB | 4 concurrent copies | 2 concurrent copies |
+
+The detected drive type and concurrency value are hidden by default. Enable **Mostrar detalles técnicos** in the Options section to see them in the UI.
+
+---
+
+## Deduplication
+
+When **Deduplicar contenido** is enabled, `backup:copy-files` computes a full SHA-256 hash of each source file before writing it. It then checks `.kopia-data/content-index.json` — a map of `hash → relative backup path`. If a file with the same content already exists somewhere in the backup, Kopia Desk creates an **NTFS hardlink** (`fs.link`) pointing to that existing content instead of copying the bytes again.
+
+If the destination filesystem does not support hardlinks (for example, a FAT32 or exFAT drive), the hardlink attempt fails silently and the file is copied normally. The index is updated and saved back to `content-index.json` after the batch completes.
+
+<Tip>
+  Deduplication is most effective for photo collections or when the same files appear in more than one source folder. On a drive with mostly unique content, it has minimal impact on space savings.
+</Tip>
+
+---
+
+## Versioning
+
+When **Guardar versiones de cambiados** is enabled (the default), Kopia Desk calls `backup:copy-versions` before overwriting any changed file in the backup. The IPC handler calls `writeVersionStream`, which gzip-compresses the existing backup copy and writes it to:
+
+```
+<destDrive>\KopiaDesk_Backup\.kopia-data\versions\<ISO-timestamp>\<relative_path>.gz
+```
+
+This lets you recover the file as it was before the most recent backup. Versions are stored by ISO timestamp so multiple versioned runs accumulate in separate subdirectories.
+
+---
+
+## Exclusion Filters
+
+The following names are excluded by default (`DEFAULT_EXCLUDES` in `lib/core.js`):
+
+```js
+[
+  "Thumbs.db",
+  "desktop.ini",
+  "$RECYCLE.BIN",
+  "System Volume Information",
+  ".git",
+  "node_modules",
+  "*.tmp",
+  "~$*"
+]
+```
+
+Patterns support `*` (any number of characters) and `?` (a single character), and are matched case-insensitively against the file or folder **name only** (not the full path). To use a custom pattern list, pass it as the second argument to `fs:scan-directory`:
+
+```js
+// Retrieve defaults via IPC
+const defaults = await window.kopiaAPI.invoke("config:default-excludes");
+
+// Or pass custom patterns to the scan
+await window.kopiaAPI.invoke("fs:scan-directory", folderPath, [
+  "*.tmp",
+  "~$*",
+  "node_modules",
+  "my-custom-folder",
+]);
+```
+
+---
+
+## Folder Name Disambiguation
+
+If two source folders would produce the same safe name — for example, `C:\ProjectA\Backup` and `D:\ProjectB\Backup` both simplify to `Backup` — the renderer's `uniqueSourceName` function appends the parent folder name (or a numeric suffix) to the second one before it is added. This ensures the two folders never share a manifest file or a backup directory on the destination drive.
+
+---
+
+## Space Check
+
+Free-space verification runs live as you toggle category checkboxes. The total bytes of all accepted files is compared against the `free` value from `drives:list`. If the requirement exceeds available space:
+
+- A warning banner shows how many additional megabytes or gigabytes are needed.
+- The **Copiar aceptados** button is disabled until enough space becomes available — either by deselecting files, freeing space on the drive, or switching to a different destination.

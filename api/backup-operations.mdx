@@ -1,0 +1,221 @@
+---
+title: "Backup Operations IPC: Copy, Version, and Concurrency"
+sidebarTitle: "Backup Operations"
+description: "window.kopiaAPI methods for planning copy concurrency, backing up files with progress events, saving compressed prior versions, and writing operation logs."
+---
+
+Once the UI has computed which files are new or changed, these four methods carry out the actual backup. The recommended pattern is: call `planConcurrency()` to pick the right parallelism for the destination drive, optionally call `backupCopyVersions()` to preserve the files that are about to be overwritten, then call `backupCopyFiles()` to copy everything in parallel. When the operation finishes, `logSave()` persists the results as a timestamped JSON report.
+
+---
+
+## `planConcurrency(driveRoot, avgFileSize)`
+
+Queries PowerShell for the physical disk's `MediaType` and `BusType` via `Get-Partition` and `Get-PhysicalDisk`, then applies the `pickConcurrency` heuristic from `lib/core.js` to suggest the number of parallel copy workers that will give the best throughput on that drive.
+
+<ParamField path="driveRoot" type="string" required>
+  Root path of the destination drive, e.g. `"E:\\"`. The drive letter is extracted with a regex (`/^([A-Za-z])/`) before being passed to the PowerShell script.
+</ParamField>
+
+<ParamField path="avgFileSize" type="number" required>
+  Average file size of the files that will be copied, in bytes. Used by `pickConcurrency` to decide whether to favour the high or low end of each drive type's concurrency range. Files smaller than 2 MB are treated as "many small files" and receive higher concurrency.
+</ParamField>
+
+**Returns:** `Promise<{ concurrency: number, driveInfo: DriveInfo }>`
+
+<ResponseField name="concurrency" type="number" required>
+  Recommended number of parallel copy workers based on `pickConcurrency`:
+
+  | Drive type | Small files (< 2 MB avg) | Large files |
+  |---|---|---|
+  | HDD (`mediaType === "HDD"`) | 2 | 1 |
+  | SSD or NVMe | 8 | 4 |
+  | Unknown / USB | 4 | 2 |
+</ResponseField>
+
+<ResponseField name="driveInfo" type="object" required>
+  Raw drive type data returned by PowerShell. Falls back to `{ mediaType: "Unknown", busType: "Unknown" }` if the PowerShell call fails or times out.
+
+  <Expandable title="driveInfo fields">
+    <ResponseField name="mediaType" type="string" required>
+      Physical media type string from `Get-PhysicalDisk`, e.g. `"HDD"`, `"SSD"`, or `"Unknown"`.
+    </ResponseField>
+    <ResponseField name="busType" type="string" required>
+      Bus type string from `Get-PhysicalDisk`, e.g. `"SATA"`, `"NVMe"`, `"USB"`, or `"Unknown"`.
+    </ResponseField>
+  </Expandable>
+</ResponseField>
+
+```javascript
+const { concurrency, driveInfo } = await window.kopiaAPI.planConcurrency('E:\\', 500000);
+// { concurrency: 4, driveInfo: { mediaType: 'SSD', busType: 'SATA' } }
+```
+
+---
+
+## `backupCopyFiles(tasks, options)`
+
+Copies an array of files to the backup drive with a bounded parallel worker pool. A journal is started on the destination drive before any files are written and deleted on success; if the process is interrupted mid-copy the journal remains on disk so `journalPeek()` / `journalCheck()` can detect and clean up partial writes on the next run.
+
+<ParamField path="tasks" type="CopyTask[]" required>
+  Array of file copy instructions.
+
+  <Expandable title="CopyTask fields">
+    <ParamField path="srcPath" type="string" required>
+      Absolute path to the source file on the local machine.
+    </ParamField>
+    <ParamField path="destRoot" type="string" required>
+      Root of the destination drive, e.g. `"E:\\"`. All tasks in a single call must share the same `destRoot`; the journal and dedup index are keyed by this value.
+    </ParamField>
+    <ParamField path="relativeDest" type="string" required>
+      Path relative to `destRoot` where the file will be written, e.g. `"KopiaDesk_Backup\\Pictures\\vacation\\beach.jpg"`. Validated by `safePath()` before writing.
+    </ParamField>
+  </Expandable>
+</ParamField>
+
+<ParamField path="options" type="object">
+  Optional copy behaviour flags.
+
+  <Expandable title="options fields">
+    <ParamField path="concurrency" type="number">
+      Maximum number of files copied simultaneously. Defaults to `3` (the module-level `BACKUP_CONCURRENCY` constant) when not provided or `<= 0`. Use the value returned by `planConcurrency()` for adaptive behaviour.
+    </ParamField>
+    <ParamField path="dedup" type="boolean">
+      When `true`, computes a full SHA-256 of each source file and checks `.kopia-data/content-index.json` for a pre-existing identical file on the destination. If found, creates a hard link (NTFS `fs.link`) instead of copying. Falls back to a normal copy if the link fails (e.g. the file system does not support hard links). The content index is persisted after all tasks complete.
+    </ParamField>
+  </Expandable>
+</ParamField>
+
+**Returns:** `Promise<{ copied: number, errors: ErrorEntry[], deduped: number }>`
+
+<ResponseField name="copied" type="number" required>
+  Total number of files successfully processed (includes both copied and deduped files).
+</ResponseField>
+
+<ResponseField name="errors" type="ErrorEntry[]" required>
+  Files that could not be copied.
+
+  <Expandable title="ErrorEntry fields">
+    <ResponseField name="file" type="string" required>
+      The `relativeDest` of the file that failed.
+    </ResponseField>
+    <ResponseField name="error" type="string" required>
+      Human-readable error message. `ENOSPC` is translated to `"No hay espacio en el disco destino."` and `EACCES` to `"Sin permiso para escribir: <relativeDest>"`.
+    </ResponseField>
+  </Expandable>
+</ResponseField>
+
+<ResponseField name="deduped" type="number" required>
+  Number of files skipped via hard-link deduplication (only non-zero when `options.dedup` is `true`).
+</ResponseField>
+
+### Progress events
+
+While `backupCopyFiles()` is running it emits a `progress` IPC event after each file completes. Subscribe with [`window.kopiaAPI.onProgress()`](/api/manifest-and-settings#onprogress-callback) before calling this method.
+
+| Field | Type | Description |
+|---|---|---|
+| `phase` | `"backup"` | Constant identifier for this operation type |
+| `current` | `number` | Number of files completed so far |
+| `total` | `number` | Total number of tasks in this call |
+| `file` | `string` | `relativeDest` of the file just processed |
+| `percent` | `number` | `Math.round((current / total) * 100)` |
+
+```javascript
+const unsubscribe = window.kopiaAPI.onProgress(({ phase, percent, file }) => {
+  console.log(`${phase} ${percent}% — ${file}`);
+});
+
+const result = await window.kopiaAPI.backupCopyFiles(
+  [
+    {
+      srcPath: 'C:\\Users\\User\\Pictures\\photo.jpg',
+      destRoot: 'E:\\',
+      relativeDest: 'KopiaDesk_Backup\\Pictures\\photo.jpg'
+    }
+  ],
+  { concurrency: 4, dedup: true }
+);
+
+unsubscribe();
+// result: { copied: 1, errors: [], deduped: 0 }
+```
+
+<Warning>
+  Always call `unsubscribe()` after the operation completes. Leaving the listener attached means your callback will fire for the next backup or restore operation as well.
+</Warning>
+
+---
+
+## `backupCopyVersions(tasks)`
+
+Gzip-compresses existing backup files to a `.gz` sibling before they are overwritten by the new copy. Call this method **before** `backupCopyFiles()` so that the previous version of each changed file is preserved. Files that are listed in the manifest but are no longer physically present on the backup drive are counted as `skipped`, not errors.
+
+<ParamField path="tasks" type="VersionTask[]" required>
+  Array of versioning instructions. `srcPath` points to the **current** file on the backup drive (the one about to be overwritten), not the source on the local PC.
+
+  <Expandable title="VersionTask fields">
+    <ParamField path="srcPath" type="string" required>
+      Absolute path to the existing file on the backup drive that should be preserved.
+    </ParamField>
+    <ParamField path="destRoot" type="string" required>
+      Root of the destination drive.
+    </ParamField>
+    <ParamField path="relativeDest" type="string" required>
+      The compressed version is written to `<destRoot>/<relativeDest>.gz`.
+    </ParamField>
+  </Expandable>
+</ParamField>
+
+**Returns:** `Promise<{ copied: number, skipped: number, errors: ErrorEntry[] }>`
+
+<ResponseField name="copied" type="number" required>
+  Number of files successfully compressed and written.
+</ResponseField>
+
+<ResponseField name="skipped" type="number" required>
+  Number of entries where `srcPath` did not exist on the backup drive. These are not errors; the file simply has no prior version to preserve.
+</ResponseField>
+
+<ResponseField name="errors" type="ErrorEntry[]" required>
+  Files that existed but could not be compressed. See `ErrorEntry` definition under `backupCopyFiles`.
+</ResponseField>
+
+```javascript
+// Preserve previous versions before overwriting them:
+await window.kopiaAPI.backupCopyVersions(versionTasks);
+// Then copy the new versions:
+await window.kopiaAPI.backupCopyFiles(copyTasks, { concurrency: 4 });
+```
+
+---
+
+## `logSave(destRoot, sourceName, report)`
+
+Persists an operation report object as a formatted JSON file in the backup drive's `.kopia-data/logs/` directory. The file name encodes both the sanitised source name and a timestamp derived from `new Date().toISOString()` (colons and dots replaced with hyphens).
+
+Saved path: `<destRoot>/KopiaDesk_Backup/.kopia-data/logs/<safeName(sourceName)>_<timestamp>.json`
+
+<ParamField path="destRoot" type="string" required>
+  Root of the destination drive, e.g. `"E:\\"`.
+</ParamField>
+
+<ParamField path="sourceName" type="string" required>
+  Human-readable source folder name. Sanitised through `safeName()` (illegal filename characters replaced with `_`, maximum 120 characters) before use in the file path.
+</ParamField>
+
+<ParamField path="report" type="object" required>
+  Any JSON-serialisable object. Typically includes totals (files copied, errors, duration) assembled by `renderer/app.js` after the backup run.
+</ParamField>
+
+**Returns:** `Promise<string>` — the absolute path to the saved log file.
+
+```javascript
+const logPath = await window.kopiaAPI.logSave('E:\\', 'Pictures', {
+  startedAt: '2024-11-15T10:30:00.000Z',
+  finishedAt: '2024-11-15T10:31:45.000Z',
+  copied: 42,
+  errors: [],
+  deduped: 3
+});
+// 'E:\\KopiaDesk_Backup\\.kopia-data\\logs\\Pictures_2024-11-15T10-31-45-000Z.json'
+```

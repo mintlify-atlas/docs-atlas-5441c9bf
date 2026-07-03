@@ -1,0 +1,154 @@
+---
+title: "Exclusion Filters: Patterns, Compilation, and Matching"
+sidebarTitle: "Exclusion Filters"
+description: "lib/core.js exports compileExcludePatterns, isExcluded, and DEFAULT_EXCLUDES for wildcard-based file exclusion during recursive directory scans."
+---
+
+Kopia Desk's exclusion system translates human-readable glob-style patterns into compiled regular expressions before any directory scan begins. The compiled array is passed directly to `scanDirectoryRecursive`, where `isExcluded` tests each entry's **name** (not its full path) against every regex. Compiling once and reusing the array avoids redundant regex construction across potentially thousands of directory entries.
+
+---
+
+## `DEFAULT_EXCLUDES`
+
+`DEFAULT_EXCLUDES` is the built-in list of patterns applied to every backup scan when no custom exclusion list is provided. It targets Windows metadata artefacts, version-control internals, and temporary files that should never be backed up.
+
+<ResponseField name="DEFAULT_EXCLUDES" type="string[]">
+  Array of eight glob-style pattern strings. Passed to
+  `compileExcludePatterns()` at scan time to produce the compiled regex array.
+</ResponseField>
+
+```javascript
+const DEFAULT_EXCLUDES = [
+  'Thumbs.db',
+  'desktop.ini',
+  '$RECYCLE.BIN',
+  'System Volume Information',
+  '.git',
+  'node_modules',
+  '*.tmp',
+  '~$*',
+];
+```
+
+The last two patterns use wildcards: `*.tmp` matches any file ending in `.tmp`, and `~$*` matches the lock files that Office creates while a document is open (e.g. `~$report.docx`).
+
+---
+
+## `compileExcludePatterns(patterns)`
+
+`compileExcludePatterns` converts an array of raw glob strings into an array of `RegExp` objects ready for matching. Invalid entries — non-strings, empty strings, whitespace-only strings — are silently filtered out, so callers can safely merge user input with `DEFAULT_EXCLUDES` without pre-validating every element.
+
+### Parameters
+
+<ParamField path="patterns" type="any[]" required>
+  Array of glob-style pattern strings. Non-string elements and blank strings
+  are ignored. Each valid pattern is trimmed before conversion.
+</ParamField>
+
+### Return value
+
+<ResponseField name="compileExcludePatterns" type="RegExp[]">
+  One compiled `RegExp` per valid input pattern. Each regex is anchored with
+  `^...$` and compiled with the case-insensitive `i` flag, so patterns match
+  regardless of Windows file name capitalisation.
+</ResponseField>
+
+### Conversion rules
+
+| Input character(s) | Regex equivalent |
+|---|---|
+| `.`, `+`, `^`, `$`, `{`, `}`, `(`, `)`, `\|`, `[`, `]`, `\\` | Escaped with `\` (literal match) |
+| `*` | `.*` (zero or more of any character) |
+| `?` | `.` (exactly one of any character) |
+
+### Implementation
+
+```javascript
+function compileExcludePatterns(patterns) {
+  return patterns
+    .filter((p) => typeof p === 'string' && p.trim())
+    .map((p) => {
+      const escaped = p.trim()
+        .replace(/[.+^${}()|[\]\\]/g, '\\$&')
+        .replace(/\*/g, '.*')
+        .replace(/\?/g, '.');
+      return new RegExp('^' + escaped + '$', 'i');
+    });
+}
+```
+
+### Filtering behaviour
+
+Non-string values and blank strings are dropped silently — only one regex is produced for the array `['', '   ', null, undefined, '*.log']`:
+
+```javascript
+const compiled = compileExcludePatterns(['', '   ', null, undefined, '*.log']);
+compiled.length; // → 1
+
+isExcluded('error.log', compiled); // → true
+```
+
+---
+
+## `isExcluded(name, compiledPatterns)`
+
+`isExcluded` tests a single file or directory name against the compiled regex array and returns `true` as soon as the first match is found.
+
+### Parameters
+
+<ParamField path="name" type="string" required>
+  The file or directory **name** (not its full path) to test. This is the
+  `entry.name` value from `fs.promises.readdir` with `withFileTypes: true`.
+</ParamField>
+
+<ParamField path="compiledPatterns" type="RegExp[]" required>
+  The array returned by `compileExcludePatterns`. Passing an empty array means
+  nothing is excluded.
+</ParamField>
+
+### Return value
+
+<ResponseField name="isExcluded" type="boolean">
+  `true` if at least one compiled regex matches `name`; `false` otherwise.
+  Matching is case-insensitive because the regexes are compiled with the `i`
+  flag.
+</ResponseField>
+
+### Examples
+
+```javascript
+const compiled = compileExcludePatterns(['*.tmp', '~$*', 'Thumbs.db']);
+
+isExcluded('report.tmp', compiled)      // → true  (matches *.tmp)
+isExcluded('~$document.docx', compiled) // → true  (matches ~$*)
+isExcluded('Thumbs.db', compiled)       // → true  (exact match, case-sensitive input)
+isExcluded('thumbs.db', compiled)       // → true  (case-insensitive match)
+isExcluded('photo.jpg', compiled)       // → false (no pattern matches)
+```
+
+<Tip>
+  To use a different exclusion set for a specific scan, pass a custom pattern
+  array to `compileExcludePatterns` and hand the result to
+  `scanDirectoryRecursive(dirPath, basePath, compiledExcludes)` directly.
+  The `fs:scan-directory` IPC channel in `main.js` accepts a custom pattern
+  list via `scanDirectory(dirPath, customPatterns)`, which overrides
+  `DEFAULT_EXCLUDES` for that scan only — useful for backing up
+  `node_modules` or `.git` intentionally.
+</Tip>
+
+---
+
+## Using all three together
+
+The typical setup at the start of a backup scan:
+
+```javascript
+const { DEFAULT_EXCLUDES, compileExcludePatterns, isExcluded, scanDirectoryRecursive } = require('./lib/core');
+
+// Compile once, reuse across the entire recursive scan
+const compiled = compileExcludePatterns(DEFAULT_EXCLUDES);
+
+// scanDirectoryRecursive calls isExcluded(entry.name, compiledExcludes)
+// for every entry it encounters
+const files = await scanDirectoryRecursive(sourcePath, '', compiled);
+```

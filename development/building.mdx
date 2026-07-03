@@ -1,0 +1,106 @@
+---
+title: "Build a Kopia Desk Windows Installer with NSIS"
+sidebarTitle: "Building"
+description: "Package Kopia Desk as a Windows installer using electron-builder. Covers the build command, NSIS target, included files, icon, and code-signing bypass."
+---
+
+Kopia Desk uses `electron-builder` to package the Electron application into a standard Windows NSIS installer. The build process bundles only the files the application needs at runtime — `main.js`, `preload.js`, the `lib/`, `renderer/`, and `assets/` directories — and excludes development artifacts such as `test/`, `docs/`, and the bulk of `node_modules/` (Electron itself is re-bundled by electron-builder from its own cache).
+
+<Warning>
+  `electron-builder --win` must run on **Windows**. Building a Windows NSIS installer on Linux or macOS requires Wine and additional tooling. For the simplest and most reliable experience, run the build command on a Windows machine.
+</Warning>
+
+## Build Steps
+
+<Steps>
+  ### Confirm your environment
+
+  Make sure you have completed the [dev setup](/development/setup) — Node.js ≥ 20 and `npm install` must have been run at least once so that `electron-builder` is present in `node_modules/.bin/`.
+
+  ### Run the build command
+
+  ```powershell
+  npm run build
+  ```
+
+  This executes `electron-builder --win`, which:
+
+  1. Reads the `"build"` configuration from `package.json`
+  2. Downloads `winCodeSign` to the electron-builder cache (first run only)
+  3. Packages the listed source files into an Electron ASAR archive
+  4. Wraps the archive and the Electron runtime into an NSIS installer
+
+  ### Locate the output
+
+  The finished installer is written to the `dist/` folder in the project root:
+
+  ```
+  dist/
+  └── Kopia Desk Setup 1.0.0.exe   ← NSIS installer
+  ```
+
+  Run the `.exe` to install Kopia Desk on any Windows machine.
+</Steps>
+
+## electron-builder Configuration
+
+The build is fully described by the `"build"` key in `package.json` — no separate `electron-builder.yml` file is needed:
+
+```json
+"build": {
+  "appId": "com.kopiadesk.app",
+  "productName": "Kopia Desk",
+  "win": {
+    "target": "nsis",
+    "icon": "assets/Kopia_Desk.png"
+  },
+  "files": [
+    "main.js",
+    "preload.js",
+    "lib/**/*",
+    "renderer/**/*",
+    "assets/**/*"
+  ]
+}
+```
+
+### Bundled files
+
+Only the files listed under `"files"` are included in the installer:
+
+| Entry | What it includes |
+|---|---|
+| `main.js` | Electron main process — IPC handlers, window creation, settings |
+| `preload.js` | `contextBridge` script that exposes `window.kopiaAPI` to the renderer |
+| `lib/**/*` | `lib/core.js` — all scanning, hashing, journal, and drive logic |
+| `renderer/**/*` | `index.html`, `app.js`, `styles.css` — the entire UI |
+| `assets/**/*` | `Kopia_Desk.png` — application icon |
+
+The `test/`, `docs/`, and `node_modules/` directories (other than the Electron runtime managed by electron-builder itself) are **not** included in the installer.
+
+<Note>
+  The application icon must be a PNG or ICO file. This project uses `assets/Kopia_Desk.png`. electron-builder converts it automatically for use as the installer and taskbar icon on Windows.
+</Note>
+
+## Code-Signing Bypass
+
+By default, electron-builder attempts to sign the installer with a code-signing certificate. If you are building without a certificate (typical during development or internal testing), disable auto-discovery to avoid a build failure:
+
+```powershell
+$env:CSC_IDENTITY_AUTO_DISCOVERY="false"; npm run build
+```
+
+This sets the environment variable for the duration of the command only — your shell session is not permanently affected.
+
+## Troubleshooting: winCodeSign Symlink Error
+
+On some Windows setups, electron-builder fails to extract `winCodeSign` because the extraction path contains symlinks that Windows does not permit. If the build fails with an error mentioning `winCodeSign` or symlinks, manually place the extracted directory in electron-builder's cache:
+
+1. Download or extract `winCodeSign` manually.
+2. Copy the extracted directory to:
+
+```
+%LOCALAPPDATA%\electron-builder\Cache\winCodeSign\winCodeSign-2.6.0\
+```
+
+3. Re-run `npm run build`. electron-builder will find the cached directory and skip the download/extraction step.

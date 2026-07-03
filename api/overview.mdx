@@ -1,0 +1,73 @@
+---
+title: "Kopia Desk API: IPC Channels and Core Library"
+sidebarTitle: "Overview"
+description: "Overview of Kopia Desk's two-layer API: the window.kopiaAPI IPC bridge for UI code and the lib/core.js module for testable business logic."
+---
+
+Kopia Desk exposes two distinct API surfaces that work in tandem: a renderer-facing bridge that the UI calls exclusively, and a testable Node.js module that holds all the real logic. Understanding both layers makes it easier to reason about what runs where—and why—in an Electron application that deliberately separates UI from system access.
+
+## Two API Surfaces
+
+### `window.kopiaAPI` — the contextBridge bridge
+
+`preload.js` runs in a privileged intermediate context and uses Electron's `contextBridge.exposeInMainWorld` to attach `window.kopiaAPI` to the renderer window. Because `contextIsolation: true` and `nodeIntegration: false` are set on every `BrowserWindow`, the renderer (`renderer/app.js`) has no access to Node.js or the file system directly—`window.kopiaAPI` is its only door to the operating system.
+
+Every method on `window.kopiaAPI` is a thin wrapper around `ipcRenderer.invoke(channel, ...args)`. The call crosses the process boundary, is handled by a matching `ipcMain.handle` registration in `main.js`, and returns a `Promise` that resolves to the handler's return value. The UI never awaits anything else.
+
+### `lib/core.js` — the testable business-logic module
+
+`lib/core.js` is a plain CommonJS module with no Electron imports. It contains scanning, hashing, exclusion filtering, drive detection, concurrency heuristics, and the journal system. Because it only uses Node built-ins (`fs`, `crypto`, `child_process`), it can be exercised with `node --test` against `test/core.test.js` without launching Electron at all. `main.js` imports it and wires each exported function to its IPC channel; no logic is duplicated between the two files.
+
+---
+
+## `window.kopiaAPI` Method Reference
+
+| Method | IPC Channel | Summary |
+|---|---|---|
+| `listDrives()` | `drives:list` | Lists connected volumes with free/total space via PowerShell `Get-Volume` |
+| `selectFolder()` | `dialog:select-folder` | Opens a native folder picker for choosing a backup source |
+| `selectRestoreTarget()` | `dialog:select-restore-target` | Opens a native folder picker titled for a restore destination |
+| `quickFolders()` | `folders:quick-list` | Returns the user's standard folders (Pictures, Documents, etc.) that exist on this PC |
+| `scanDirectory(dirPath, excludePatterns)` | `fs:scan-directory` | Recursively scans a directory and returns a `FileMap` of metadata |
+| `defaultExcludePatterns()` | `config:default-excludes` | Returns the `DEFAULT_EXCLUDES` array from `lib/core.js` |
+| `hashFile(filePath)` | `fs:hash-file` | Streams an entire file and returns its lowercase hex SHA-256 digest |
+| `quickHashFile(filePath, size)` | `fs:quick-hash` | Returns a SHA-256 digest computed from only the first and last 64 KB of a file |
+| `loadManifest(destRoot, sourceName)` | `manifest:load` | Loads a backup manifest JSON from `.kopia-data/manifests/` |
+| `saveManifest(destRoot, sourceName, manifest)` | `manifest:save` | Saves a manifest, preserving the previous version as `.prev.json` |
+| `rememberSourcePath(destRoot, sourceName, sourcePath)` | `sources:remember` | Saves a `sourceName → localPath` mapping to `sources.json` |
+| `knownSourcePaths(destRoot)` | `sources:known-paths` | Returns the full `sourceName → localPath` mapping object |
+| `planConcurrency(driveRoot, avgFileSize)` | `backup:plan-concurrency` | Detects drive type via PowerShell and returns the recommended copy concurrency |
+| `journalPeek(destRoot)` | `journal:peek` | Reports any interrupted backup without modifying files |
+| `journalCheck(destRoot)` | `journal:check` | Deletes partially-written files left by an interrupted backup |
+| `backupCopyFiles(tasks, options)` | `backup:copy-files` | Copies files in parallel with progress events, deduplication, and journal tracking |
+| `backupCopyVersions(tasks)` | `backup:copy-versions` | Gzip-compresses existing backup files before they are overwritten |
+| `logSave(destRoot, sourceName, report)` | `log:save` | Persists an operation report as a timestamped JSON file |
+| `restoreListSources(backupDrive)` | `restore:list-sources` | Lists backed-up folder names found in `.kopia-data/manifests/` |
+| `restoreFullList(backupDrive, sourceName)` | `restore:full-list` | Lists every file in a backup folder with resolved absolute paths |
+| `restoreScan(backupDrive, sourceName, localPath)` | `restore:scan` | Compares the backup manifest against the local folder to find missing files |
+| `restoreCopyFiles(files, targetDir, options)` | `restore:copy-files` | Copies files from the backup drive back to the local PC |
+| `loadSettings()` | `settings:load` | Loads persistent user settings from Electron's `userData` directory |
+| `saveSettings(settings)` | `settings:save` | Overwrites `kopia-desk-settings.json` with the provided object |
+| `onProgress(callback)` | `progress` event | Subscribes to real-time progress events; returns an unsubscribe function |
+
+---
+
+## API Pages
+
+<CardGroup cols={2}>
+  <Card title="Drives & Folders" icon="hard-drive" href="/api/drives-and-folders">
+    List connected drives, open native folder dialogs, and retrieve the user's standard folders.
+  </Card>
+  <Card title="Scanning & Hashing" icon="magnifying-glass" href="/api/scanning-and-hashing">
+    Recursively scan directories, retrieve default exclusion patterns, and compute file checksums.
+  </Card>
+  <Card title="Backup Operations" icon="cloud-arrow-up" href="/api/backup-operations">
+    Plan concurrency, copy files with progress, save compressed prior versions, and write logs.
+  </Card>
+  <Card title="Restore Operations" icon="cloud-arrow-down" href="/api/restore-operations">
+    List backed-up folders, scan for missing files, and copy files back to the local PC.
+  </Card>
+  <Card title="Manifests & Settings" icon="file-lines" href="/api/manifest-and-settings">
+    Load and save backup manifests, remember source folder paths, and persist user settings.
+  </Card>
+</CardGroup>

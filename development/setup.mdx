@@ -1,0 +1,123 @@
+---
+title: "Set Up the Kopia Desk Development Environment"
+sidebarTitle: "Dev Setup"
+description: "Configure a local development environment for Kopia Desk. Covers prerequisites, cloning, dependency install, and running the app from source on Windows."
+---
+
+Kopia Desk is an Electron-based Windows desktop application. Its codebase is intentionally lean — there are no runtime npm dependencies, only two dev dependencies (`electron` and `electron-builder`), and all backup logic lives in a single Node.js module (`lib/core.js`) that can be loaded and tested without ever starting Electron. The steps below get you from a fresh Windows machine to a running development build in minutes.
+
+## Prerequisites
+
+Before cloning the repository, make sure the following are installed on your Windows machine:
+
+<CardGroup cols={2}>
+  <Card title="Windows" icon="windows">
+    Kopia Desk targets Windows exclusively. Drive detection uses `Get-Volume` (PowerShell) and folder-hiding uses `attrib`, both Windows-only.
+  </Card>
+  <Card title="Node.js ≥ 20" icon="node">
+    Node 20 or later is required. npm is bundled with Node — no separate install needed. Download from [nodejs.org](https://nodejs.org).
+  </Card>
+</CardGroup>
+
+## Setup Steps
+
+<Steps>
+  ### Clone the repository
+
+  Open a terminal (PowerShell or `cmd`) and clone the project from GitHub:
+
+  ```powershell
+  git clone https://github.com/Pachanga12/Kopia_Desk_Beta_1.git
+  cd Kopia_Desk_Beta_1
+  ```
+
+  ### Install dependencies
+
+  Install the two dev dependencies — Electron and electron-builder:
+
+  ```powershell
+  npm install
+  ```
+
+  This downloads `electron ^43.0.0` and `electron-builder ^26.15.3` into `node_modules/`. There are **no runtime npm dependencies**; the application relies entirely on Node.js built-in modules.
+
+  ### Start the app in development mode
+
+  Launch Kopia Desk directly from source:
+
+  ```powershell
+  npm start
+  ```
+
+  This runs `electron .`, which loads `main.js` as the Electron main process entry point and opens the application window.
+</Steps>
+
+<Note>
+  DevTools are not available in production builds. During development, add `mainWindow.webContents.openDevTools()` inside the `BrowserWindow` creation block in `main.js` to open Chromium DevTools in the renderer window.
+</Note>
+
+## Built-in Modules Used (No Extra Runtime Dependencies)
+
+The application uses only Node.js built-in modules — nothing from npm is needed at runtime:
+
+| Module | Used for |
+|---|---|
+| `fs` | All file I/O: scanning, copying, reading/writing manifests and journals |
+| `crypto` | SHA-256 hashing via streams (`hashFileAsync`) and the quick head+tail hash (`quickHashFile`) |
+| `child_process` | Spawning `powershell.exe` for drive detection (`Get-Volume`) and `attrib` for folder hiding |
+| `zlib` | Gzip compression of previous file versions in `.kopia-data/versions/` |
+| `path` | Path resolution and `safePath` traversal protection |
+| `util` | `promisify` to convert `execFile` into an async function |
+
+## Project Layout and What to Edit
+
+Understanding the split between files helps you find the right place for any change:
+
+<Accordion title="lib/core.js — Business logic (no Electron dependency)">
+  This CommonJS module contains all scanning, hashing, exclusion filtering, drive detection, concurrency heuristics, and journal management. It has zero Electron imports and can be loaded directly with `node --test`.
+
+  Edit this file to change:
+  - How files are scanned (`scanDirectoryRecursive`)
+  - How files are hashed (`hashFileAsync`, `quickHashFile`)
+  - Exclusion pattern compilation and matching (`compileExcludePatterns`, `isExcluded`)
+  - Concurrency strategy (`pickConcurrency`)
+  - Journal read/write/cleanup logic (`startJournal`, `appendJournalDone`, `finishJournal`, `peekJournals`, `checkJournals`)
+  - Path safety (`safeName`, `safePath`)
+</Accordion>
+
+<Accordion title="main.js — Electron main process and IPC channels">
+  Runs in Node.js with full OS access. Imports `lib/core.js` and wires each function to an IPC channel via `ipcMain.handle()`. Also manages the `BrowserWindow`, dialog boxes, and settings persistence.
+
+  Edit this file to:
+  - Add a new IPC channel (also expose it in `preload.js`)
+  - Change window creation options (size, frame, DevTools)
+  - Modify how drives are listed or how manifests are loaded/saved
+</Accordion>
+
+<Accordion title="preload.js — Secure IPC bridge (contextBridge)">
+  Runs in an isolated context with `contextIsolation: true` and `nodeIntegration: false`. Exposes `window.kopiaAPI` to the renderer using `contextBridge.exposeInMainWorld`. The renderer can only call functions explicitly listed here.
+
+  Edit this file whenever you add a new IPC channel in `main.js` — the renderer cannot call it unless it is exposed here first.
+</Accordion>
+
+<Accordion title="renderer/app.js and renderer/styles.css — UI">
+  `app.js` manages all DOM updates, application state, and orchestrates the backup and restore flows via `window.kopiaAPI`. It has no direct access to Node.js or the file system.
+
+  `styles.css` is plain CSS with CSS custom properties for theming. The light/dark toggle writes to `localStorage` and flips the `data-theme` attribute on `<html>` — no server round-trip.
+
+  Edit these files to change any visual behaviour, UI flow, or styling.
+</Accordion>
+
+## Running as Administrator
+
+Kopia Desk uses `powershell.exe -Command "Get-Volume ..."` to detect connected drives. On some Windows configurations, this command requires elevated privileges. If the drive list appears empty, launch your terminal as administrator:
+
+```powershell
+# In an elevated cmd or PowerShell window:
+cd path\to\Kopia_Desk_Beta_1
+npm start
+```
+
+<Tip>
+  You can also right-click `cmd.exe` in the Start menu and select **Run as administrator** before navigating to the project folder.
+</Tip>

@@ -1,0 +1,243 @@
+---
+title: "Testing Kopia Desk: Node Test Runner and CI"
+sidebarTitle: "Testing"
+description: "Run Kopia Desk's 31-test suite with Node's built-in test runner. Tests cover safeName, safePath, exclusion filters, hashing, scanning, and the journal."
+---
+
+Kopia Desk ships with a 31-test suite that exercises every function exported from `lib/core.js`. Because `lib/core.js` has no Electron dependency — only Node.js built-ins — the entire suite runs with Node's built-in test runner without installing any additional test framework. Tests create real temporary directories, write real files, and clean up after themselves using the `t.after()` hook.
+
+## Running the Tests
+
+```powershell
+npm test
+```
+
+This executes `node --test`, which automatically discovers `test/core.test.js`. No configuration file is needed — Node's test runner finds test files matching the default discovery pattern.
+
+A passing run looks like:
+
+```
+▶ safeName reemplaza caracteres inválidos de nombres de archivo
+▶ safeName trunca a 120 caracteres
+...
+ℹ tests 31
+ℹ pass 31
+ℹ fail 0
+```
+
+## What the Tests Cover
+
+### `safeName` (4 tests)
+
+Verifies that file and folder names are sanitized before use as manifest keys or backup directory names:
+
+- Invalid filesystem characters (`< > : " / \ | ? *` and control characters) are replaced with `_`
+- Names longer than 120 characters are truncated
+- An all-invalid input (such as `""`) never produces an empty string — falls back to `"carpeta"`
+- Forward and backslashes are replaced, so the result is always a flat filename segment
+
+```js
+test("safeName reemplaza caracteres inválidos de nombres de archivo", () => {
+  assert.equal(safeName('Fotos:2023<>|?*"'), "Fotos_2023______");
+});
+
+test("safeName trunca a 120 caracteres", () => {
+  const long = "a".repeat(200);
+  assert.equal(safeName(long).length, 120);
+});
+
+test("safeName nunca devuelve string vacío", () => {
+  assert.equal(safeName(""), "carpeta");
+});
+
+test("safeName reemplaza barras pero no las considera vacías", () => {
+  assert.equal(safeName("///"), "___");
+});
+```
+
+### `safePath` (6 tests)
+
+Verifies that path traversal attacks cannot escape the backup destination root before any write operation:
+
+- A valid relative path resolves correctly inside the root
+- The resolved path being exactly the root is also accepted
+- `../../Windows/System32` style traversal throws with `/fuera del disco destino/`
+- A sibling-directory with the same name prefix (`../Backup2/evil.txt` when root is `D:/Backup`) is rejected — the check appends a path separator before comparing, so prefix-matching cannot be fooled
+- Null bytes in the path throw with `/caracteres nulos/`
+- Empty strings and non-string inputs both throw
+
+```js
+test("safePath rechaza un path traversal fuera del root", () => {
+  const root = path.resolve("D:/KopiaDesk_Backup");
+  assert.throws(
+    () => safePath(root, "../../Windows/System32"),
+    /fuera del disco destino/
+  );
+});
+
+test("safePath rechaza una carpeta hermana con el mismo prefijo de nombre", () => {
+  const root = path.resolve("D:/Backup");
+  assert.throws(
+    () => safePath(root, "../Backup2/evil.txt"),
+    /fuera del disco destino/
+  );
+});
+
+test("safePath rechaza rutas con bytes nulos", () => {
+  const root = path.resolve("D:/KopiaDesk_Backup");
+  assert.throws(() => safePath(root, "archivo\0.txt"), /caracteres nulos/);
+});
+```
+
+### Exclusion Filters (3 tests)
+
+Covers `compileExcludePatterns` and `isExcluded`:
+
+- Glob wildcards `*` (zero or more characters) and `?` (exactly one character) are supported
+- Matching is case-insensitive (`Thumbs.db` matches `thumbs.db`)
+- Empty strings, whitespace-only strings, `null`, and `undefined` entries in the pattern array are silently ignored — only valid, non-empty strings produce a compiled regex
+- `DEFAULT_EXCLUDES` is checked to contain the patterns documented in the README: `Thumbs.db`, `desktop.ini`, `$RECYCLE.BIN`, `.git`, `node_modules`, `*.tmp`
+
+```js
+test("compileExcludePatterns + isExcluded soportan comodines '*' y '?'", () => {
+  const compiled = compileExcludePatterns(["*.tmp", "~$*", "Thumbs.db"]);
+  assert.equal(isExcluded("archivo.tmp", compiled), true);
+  assert.equal(isExcluded("~$documento.docx", compiled), true);
+  assert.equal(isExcluded("thumbs.db", compiled), true); // case-insensitive
+  assert.equal(isExcluded("foto.jpg", compiled), false);
+});
+
+test("compileExcludePatterns ignora patrones vacíos o no-string", () => {
+  const compiled = compileExcludePatterns(["", "   ", null, undefined, "*.log"]);
+  assert.equal(compiled.length, 1);
+  assert.equal(isExcluded("error.log", compiled), true);
+});
+```
+
+### `scanDirectoryRecursive` (2 tests)
+
+Uses real temporary directories created with `fs.mkdtempSync`:
+
+- Builds a nested directory tree, places excluded files (`Thumbs.db`) and excluded directories (`node_modules`) alongside regular files, and asserts that only the non-excluded files appear in the returned map
+- Verifies that each entry in the result map contains the correct `size` and `fullPath` properties
+- An empty directory returns an empty `{}` map without error
+
+### `hashFileAsync` and `quickHashFile` (4 tests)
+
+- `quickHashFile` produces the same hash for two files with identical content
+- `quickHashFile` produces different hashes for files with different content
+- `quickHashFile` on a file larger than 64 KB reads only the first and last 64 KB — a file whose middle bytes change produces the same quick hash, which the test explicitly documents as a known trade-off
+- `hashFileAsync` computes a full SHA-256 stream hash and returns the expected deterministic hex digest (`f3a7a67ab20351ddf47e87ecbf0e5a0868fc0e257d0aea65d018b0405b9a34f3` for the string `"contenido de prueba"`)
+
+### `pickConcurrency` (5 tests)
+
+Verifies the disk-type × file-size concurrency heuristic:
+
+| Scenario | Expected concurrency |
+|---|---|
+| HDD, avg file < 2 MB (many small files) | `2` |
+| HDD, avg file ≥ 2 MB (large files) | `1` |
+| SSD (`mediaType: "SSD"`), small files | `8` |
+| NVMe (`busType: "NVMe"`, unknown mediaType), mixed | `4` |
+| Unknown disk type, small files | `4` |
+| Unknown disk type, large files | `2` |
+
+### Journal (7 tests)
+
+The journal is an append-only JSONL file written before each copy operation. It records which files were planned and marks each one as done as it completes. If the process is interrupted, the next run detects the leftover journal and cleans up partial files.
+
+The tests cover:
+
+- **`startJournal`** returns `null` when the task list is empty (no journal file is created)
+- **`finishJournal`** deletes the journal file when the backup completes without errors
+- **`peekJournals`** reads pending files and reports the count and `lastInterruptedAt` timestamp — without deleting the journal or the partial files on disk
+- **`checkJournals`** deletes partial files (those not marked `done`) and removes the journal — files already marked `done` are preserved
+- **Legacy `.json` format** — journals written by an older format are still parsed correctly so that old interrupted backups can be cleaned up after upgrading
+
+```js
+test("journal: peekJournals informa lo pendiente sin borrar nada", (t) => {
+  const destRoot = makeTempDir();
+  t.after(() => fs.rmSync(destRoot, { recursive: true, force: true }));
+  const jDir = path.join(destRoot, "journal");
+
+  const journalPath = startJournal(jDir, [
+    { relativeDest: "a.txt" },
+    { relativeDest: "b.txt" },
+  ]);
+  fs.writeFileSync(path.join(destRoot, "b.txt"), "parcial");
+  appendJournalDone(journalPath, "a.txt");
+
+  const peek = peekJournals(jDir);
+  assert.equal(peek.found, 1);
+  assert.equal(peek.pendingFiles, 1);
+  assert.ok(peek.lastInterruptedAt);
+
+  // peek must not delete anything
+  assert.ok(fs.existsSync(path.join(destRoot, "b.txt")));
+  assert.ok(fs.existsSync(journalPath));
+});
+```
+
+## CI Configuration
+
+Tests run automatically on GitHub Actions on every push and pull request to `master`. The matrix covers Node 20.x and Node 22.x on `windows-latest`:
+
+```yaml
+name: CI
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+    branches: [master]
+
+jobs:
+  test:
+    runs-on: windows-latest
+
+    strategy:
+      fail-fast: false
+      matrix:
+        node-version: ["20.x", "22.x"]
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node ${{ matrix.node-version }}
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node-version }}
+          cache: npm
+
+      # Los tests sólo ejercitan lib/core.js (fs, crypto, child_process), así que
+      # se salta la descarga del binario de Electron (--ignore-scripts) para que
+      # el CI sea rápido y no dependa de la red para bajar ~100 MB.
+      - name: Install dependencies
+        run: npm ci --ignore-scripts
+
+      - name: Run tests
+        run: npm test
+```
+
+<Note>
+  CI uses `npm ci --ignore-scripts` to skip the Electron binary download (~100 MB). This works because the tests only import `lib/core.js`, which uses only Node.js built-ins (`fs`, `crypto`, `child_process`, `path`, `util`) and has no `require("electron")` anywhere. The Electron binary is only needed to run `npm start` or `npm run build` locally.
+</Note>
+
+## Adding New Tests
+
+<Tip>
+  To add tests for new functions in `lib/core.js`, import them at the top of `test/core.test.js` alongside the existing imports, then use `node:test` and `node:assert/strict` — no additional packages needed:
+
+  ```js
+  const test = require("node:test");
+  const assert = require("node:assert/strict");
+  const { myNewFunction } = require("../lib/core.js");
+
+  test("myNewFunction does the right thing", () => {
+    assert.equal(myNewFunction("input"), "expected output");
+  });
+  ```
+
+  Run `npm test` locally to verify before pushing — the CI matrix will then confirm the test passes on both Node 20 and Node 22.
+</Tip>

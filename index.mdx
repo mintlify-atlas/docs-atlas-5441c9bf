@@ -1,20 +1,77 @@
 ---
-title: "Introduction"
-description: "Welcome to your project"
+title: "Kopia Desk: Incremental Backup for Windows"
+sidebarTitle: "Home"
+description: "Kopia Desk backs up your Windows folders to external drives with incremental copies, deduplication, versioning, and crash recovery — all from a native desktop UI."
 ---
 
-Write a short description of your product here. What it does, who it's for, and what they can accomplish with it.
+Kopia Desk is a Windows desktop application built with Electron that performs incremental backups of your local folders to external drives or USB sticks. It compares your files against a saved manifest, copies only what changed, and gives you full control over what gets backed up through a clean native interface.
 
-<Tip>
-  Ready to make this your own? Start by editing this page. Update your `docs.json` file to customize your site. Then fill out the [Quickstart](/quickstart) page.
-</Tip>
+<CardGroup cols={2}>
+  <Card title="Installation" icon="download" href="/installation">
+    Install Kopia Desk on Windows — prerequisites, build from source, or run in development mode.
+  </Card>
+  <Card title="Quickstart" icon="rocket" href="/quickstart">
+    Back up your first folder in under five minutes with step-by-step guidance.
+  </Card>
+  <Card title="Backup" icon="hard-drive" href="/features/backup">
+    Understand incremental scanning, change detection, and the copy workflow.
+  </Card>
+  <Card title="API Reference" icon="code" href="/api/overview">
+    Explore the full `window.kopiaAPI` IPC surface and the `lib/core.js` module.
+  </Card>
+</CardGroup>
 
-<Card title="Quickstart" icon="rocket" href="/quickstart">
-  This card links to the quickstart page in your project.
-</Card>
-<Card title="Components" icon="puzzle-piece" href="https://mintlify.com/docs/components">
-  Add cards, callouts, steps, tabs, and more to design and structure your pages.
-</Card>
-<Card title="Settings" icon="gear" href="https://mintlify.com/docs/organize/settings">
-  Set your site name, branding, and navigation in the `docs.json` file.
-</Card>
+## What Kopia Desk does
+
+Kopia Desk scans your chosen source folders, compares every file against the last saved manifest, and presents you with a categorized list of new, changed, and deleted files. You decide which categories to accept, then Kopia Desk copies only those files to `<drive>\KopiaDesk_Backup\<folder>\` on your external drive.
+
+<CardGroup cols={3}>
+  <Card title="Incremental" icon="arrows-rotate">
+    Only new and changed files are copied. A quick header+tail hash avoids re-copying files that only changed their timestamp.
+  </Card>
+  <Card title="Smart concurrency" icon="gauge-high">
+    Copy parallelism adapts automatically to the destination drive type — higher for SSDs, lower for spinning HDDs.
+  </Card>
+  <Card title="Deduplication" icon="link">
+    Identical files across folders are stored once and linked via NTFS hardlinks, saving space on the backup drive.
+  </Card>
+  <Card title="Versioning" icon="clock-rotate-left">
+    Before overwriting a changed file in the backup, the previous version is compressed with gzip and saved to `.kopia-data/versions/`.
+  </Card>
+  <Card title="Crash recovery" icon="shield-check">
+    An append-only journal records each file as it is copied. If the app or drive disconnects mid-backup, partial files are detected and cleaned up on the next run.
+  </Card>
+  <Card title="Restore" icon="rotate-left">
+    Two restore modes: compare your PC against the backup and recover only missing files, or restore an entire folder to any location from scratch.
+  </Card>
+</CardGroup>
+
+## Get started
+
+<Steps>
+  <Step title="Install prerequisites">
+    Make sure you have **Node.js ≥ 20** and **npm** installed on Windows. Then clone the repository and install dependencies.
+    ```powershell
+    npm install
+    ```
+  </Step>
+  <Step title="Launch the app">
+    Start Kopia Desk in development mode:
+    ```powershell
+    npm start
+    ```
+  </Step>
+  <Step title="Add a source folder">
+    Click **+ Añadir carpeta** in the sidebar, or use one of the quick-access buttons (Pictures, Documents, Downloads, Music, Videos, Desktop) to add a source folder with a single click.
+  </Step>
+  <Step title="Select a destination drive">
+    Choose an external drive or USB stick from the **Destino** dropdown. Kopia Desk lists all connected drives with available space via PowerShell.
+  </Step>
+  <Step title="Scan and back up">
+    Click **Escanear cambios** to detect new, changed, and deleted files, then **Copiar aceptados** to start the backup.
+  </Step>
+</Steps>
+
+<Note>
+  Kopia Desk is a Windows-only application. The drive detection and hidden-folder features rely on PowerShell and NTFS-specific APIs.
+</Note>

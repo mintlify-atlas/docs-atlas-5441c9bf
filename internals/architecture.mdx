@@ -1,0 +1,116 @@
+---
+title: "Kopia Desk Architecture: Electron Process Model"
+sidebarTitle: "Architecture"
+description: "How Kopia Desk is structured across Electron's main process, preload bridge, and renderer — and why each layer exists for security and testability."
+---
+
+Kopia Desk follows Electron's recommended three-layer process model. Each layer has a strict, well-defined responsibility: the main process owns all OS access, the preload script acts as a typed bridge between OS and UI, and the renderer runs in a fully isolated context with zero Node.js access. This separation is not cosmetic — it is what allows `lib/core.js` to be tested with a plain `node --test` invocation and what prevents the renderer from ever touching the file system directly.
+
+## Three-Layer Architecture
+
+<CardGroup cols={3}>
+  <Card title="main.js" icon="server">
+    **Main process** — full Node.js environment. Owns disk I/O, IPC handlers, dialog windows, and process spawning. Imports all logic from `lib/core.js`.
+  </Card>
+  <Card title="preload.js" icon="bridge-water">
+    **Preload script** — runs with limited Electron access. Exposes exactly the functions the renderer needs as `window.kopiaAPI` via `contextBridge`.
+  </Card>
+  <Card title="renderer/app.js" icon="display">
+    **Renderer** — pure browser environment. No Node.js, no `require`. All OS operations are calls to `window.kopiaAPI.*`.
+  </Card>
+</CardGroup>
+
+## Why `lib/core.js` Is Separate
+
+All scanning, hashing, exclusion filtering, path safety checks, drive detection, and journal logic live in `lib/core.js` — a standalone CommonJS module with **no Electron import**. `main.js` imports it and wires each exported function to an IPC channel, but adds no duplicate logic.
+
+Because `lib/core.js` carries no Electron dependency, the full test suite runs without launching a browser window:
+
+```powershell
+npm test
+# internally: node --test test/core.test.js
+```
+
+This means 31 tests covering hashing, path traversal, exclusion patterns, and journal parsing all execute in milliseconds as plain Node.js processes.
+
+## Security Settings in BrowserWindow
+
+The `BrowserWindow` is created with two security-critical flags:
+
+```js
+// main.js
+mainWindow = new BrowserWindow({
+  width: 1300,
+  height: 820,
+  webPreferences: {
+    preload: path.join(__dirname, "preload.js"),
+    contextIsolation: true,   // renderer cannot access Node globals
+    nodeIntegration: false,   // renderer cannot require() anything
+  },
+});
+```
+
+`contextIsolation: true` means the renderer's JavaScript context is entirely separate from the preload context — even if an attacker injects script into the renderer, it cannot reach Node APIs. `nodeIntegration: false` removes the `require` function from the renderer entirely.
+
+## IPC Channel Naming Convention
+
+All channels follow the `resource:action` pattern, making intent obvious at a glance:
+
+| Channel | Direction | What it does |
+|---|---|---|
+| `drives:list` | invoke | Lists connected drives via PowerShell `Get-Volume` |
+| `fs:scan-directory` | invoke | Recursively scans a folder, applying exclusions |
+| `fs:hash-file` | invoke | Full SHA-256 stream hash of a file |
+| `fs:quick-hash` | invoke | Head + tail 64 KB hash for change detection |
+| `backup:copy-files` | invoke | Copies a batch of files with progress events |
+| `backup:copy-versions` | invoke | gzip-compresses old versions before overwriting |
+| `backup:plan-concurrency` | invoke | Detects drive type and returns adaptive concurrency |
+| `manifest:load` | invoke | Reads the saved manifest JSON for a source folder |
+| `manifest:save` | invoke | Writes manifest, creating a `.prev.json` backup first |
+| `journal:peek` | invoke | Reports interrupted backup without modifying anything |
+| `journal:check` | invoke | Cleans partial files after user confirmation |
+| `restore:scan` | invoke | Diffs manifest vs local folder for the Compare tab |
+| `restore:copy-files` | invoke | Restores files from backup to a chosen directory |
+| `settings:load` / `settings:save` | invoke | Persists user preferences to `userData` |
+
+The renderer also listens to the **`progress`** push event, which `backup:copy-files` and `restore:scan` emit for each file processed, carrying `{ phase, current, total, file, percent }`.
+
+## Data Flow for a Backup Operation
+
+<Steps>
+  <Step title="Renderer calls window.kopiaAPI">
+    `app.js` calls `window.kopiaAPI.scanDirectory(dirPath, excludePatterns)`.
+  </Step>
+  <Step title="Preload forwards over IPC">
+    `preload.js` calls `ipcRenderer.invoke('fs:scan-directory', dirPath, excludePatterns)` and returns the resulting Promise.
+  </Step>
+  <Step title="Main process handles the channel">
+    `ipcMain.handle('fs:scan-directory', ...)` in `main.js` validates that the path exists, then calls `scanDirectoryRecursive` imported from `lib/core.js`.
+  </Step>
+  <Step title="core.js does the async I/O">
+    `scanDirectoryRecursive` uses `fs.promises.readdir` and processes every directory level with `Promise.all`, then returns a `{ [relativePath]: fileInfo }` map.
+  </Step>
+  <Step title="Result flows back to the renderer">
+    The resolved value travels back through IPC → preload → `window.kopiaAPI.scanDirectory` Promise → `app.js` state.
+  </Step>
+</Steps>
+
+## File Structure
+
+```
+Kopia_Desk_Beta_1/
+├── main.js          ← Main process (Node.js, IPC handlers)
+├── preload.js       ← contextBridge → window.kopiaAPI
+├── lib/
+│   └── core.js      ← Testable logic (no Electron dependency)
+├── renderer/
+│   ├── index.html
+│   ├── app.js       ← UI logic (no Node access)
+│   └── styles.css
+└── test/
+    └── core.test.js ← node --test suite
+```
+
+<Note>
+  `lib/core.js` exports every function with `module.exports`. `main.js` destructures only what it needs at the top of the file. No logic is duplicated between the two.
+</Note>

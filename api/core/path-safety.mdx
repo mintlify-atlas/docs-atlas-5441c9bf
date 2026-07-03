@@ -1,0 +1,148 @@
+---
+title: "Path Safety Functions: safeName and safePath"
+sidebarTitle: "Path Safety"
+description: "lib/core.js exports safeName and safePath for sanitizing file names and preventing path traversal attacks when writing to the backup drive."
+---
+
+Kopia Desk performs every file write operation through two safety primitives exported from `lib/core.js`. `safeName` normalises arbitrary strings into valid directory names and manifest keys, while `safePath` resolves a relative path and enforces that it stays inside the intended backup root — blocking path traversal attacks before a single byte hits the destination drive.
+
+---
+
+## `safeName(name)`
+
+`safeName` accepts any value, coerces it to a string, strips characters that are illegal in Windows file names, caps the result at 120 characters, and guarantees a non-empty return value. It is called whenever a source folder name is turned into a manifest key or a destination subdirectory.
+
+### Parameters
+
+<ParamField path="name" type="any" required>
+  The value to sanitise. Coerced to a string with `String(name)` before any
+  processing.
+</ParamField>
+
+### Return value
+
+<ResponseField name="safeName" type="string">
+  The sanitised name. All characters matching `[<>:"/\\|?*\x00-\x1f]` are
+  replaced with `_`. The result is truncated to 120 characters. If the result
+  would be an empty string, returns `'carpeta'` as the fallback.
+</ResponseField>
+
+### Implementation
+
+```javascript
+function safeName(name) {
+  return String(name).replace(/[<>:"/\\|?*\x00-\x1f]/g, "_").slice(0, 120) || "carpeta";
+}
+```
+
+### Examples
+
+The tests in `test/core.test.js` cover the four key cases:
+
+```javascript
+safeName('Fotos:2023<>|?*"') // → 'Fotos_2023______'
+safeName('a'.repeat(200))    // → 120-char string
+safeName('')                 // → 'carpeta'
+safeName('///')              // → '___'
+```
+
+<Tip>
+  `safeName` is applied to every source folder name before it is used as a
+  subdirectory under `KopiaDesk_Backup\`. Two different source paths that
+  sanitise to the same name are disambiguated upstream by `uniqueSourceName()`
+  in `renderer/app.js` before they ever reach `safeName`.
+</Tip>
+
+---
+
+## `safePath(root, relativePath)`
+
+`safePath` resolves a relative path against a trusted root and throws if the
+result would escape that root. It is the last line of defence against path
+traversal payloads — `../../Windows/System32`, embedded null bytes, and sibling
+directories whose names share the root's prefix are all rejected.
+
+### Parameters
+
+<ParamField path="root" type="string" required>
+  The absolute path to the backup root (e.g. `D:\KopiaDesk_Backup`). Used as
+  the anchor; the resolved path must begin with `path.resolve(root) + path.sep`
+  or equal `path.resolve(root)` exactly.
+</ParamField>
+
+<ParamField path="relativePath" type="string" required>
+  A path relative to `root`, typically taken from a task list or journal entry
+  (e.g. `Fotos/img.jpg`). Must be a non-empty string and must not contain null
+  bytes (`\0`).
+</ParamField>
+
+### Return value
+
+<ResponseField name="safePath" type="string">
+  The resolved absolute path, guaranteed to be inside `root`. Suitable for
+  passing directly to `fs.copyFileSync`, `fs.unlinkSync`, or any other file
+  system operation.
+</ResponseField>
+
+### Errors thrown
+
+| Condition | Message |
+|---|---|
+| `relativePath` is falsy or not a string | `"Ruta no válida."` |
+| `relativePath` contains a null byte (`\0`) | `"Ruta contiene caracteres nulos."` |
+| Resolved path escapes the root | `"Ruta fuera del disco destino."` |
+
+### Implementation
+
+```javascript
+function safePath(root, relativePath) {
+  if (!relativePath || typeof relativePath !== "string") {
+    throw new Error("Ruta no válida.");
+  }
+  if (relativePath.includes("\0")) {
+    throw new Error("Ruta contiene caracteres nulos.");
+  }
+  const resolved = path.resolve(root, relativePath);
+  let normalizedRoot = path.resolve(root);
+  if (!normalizedRoot.endsWith(path.sep)) normalizedRoot += path.sep;
+  if (!resolved.startsWith(normalizedRoot) && resolved !== path.resolve(root)) {
+    throw new Error("Ruta fuera del disco destino.");
+  }
+  return resolved;
+}
+```
+
+<Note>
+  The `normalizedRoot + path.sep` suffix check prevents a sibling directory
+  such as `D:\KopiaDesk_Backup2` from passing the `startsWith` test — a subtle
+  vulnerability that a plain prefix comparison would miss.
+</Note>
+
+### Examples
+
+```javascript
+// Valid relative path — resolves normally
+safePath('D:\\KopiaDesk_Backup', 'Fotos/img.jpg')
+// → 'D:\KopiaDesk_Backup\Fotos\img.jpg'
+
+// Path traversal — throws "Ruta fuera del disco destino."
+safePath('D:\\KopiaDesk_Backup', '../../Windows/System32')
+
+// Null bytes — throws "Ruta contiene caracteres nulos."
+safePath('D:\\KopiaDesk_Backup', 'archivo\0.txt')
+
+// Empty or non-string — throws "Ruta no válida."
+safePath('D:\\KopiaDesk_Backup', '')
+safePath('D:\\KopiaDesk_Backup', null)
+
+// Sibling directory with same name prefix — throws "Ruta fuera del disco destino."
+safePath('D:\\Backup', '../Backup2/evil.txt')
+```
+
+<Warning>
+  Always call `safePath(destRoot, relativeDest)` before every file write or
+  delete operation that uses a path sourced from user input, a manifest, or a
+  journal. `main.js` enforces this at the `backup:copy-files` and
+  `journal:check` handlers — skipping the call even once creates an
+  unguarded write path to the host file system.
+</Warning>

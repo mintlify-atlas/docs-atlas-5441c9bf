@@ -1,0 +1,151 @@
+---
+title: "Security Model: Isolation, Path Safety, and Journals"
+sidebarTitle: "Security"
+description: "Kopia Desk's security design: Electron context isolation, path traversal prevention, manifest size limits, journal-based crash recovery, and name collision handling."
+---
+
+Kopia Desk applies several layers of defence to keep backup operations safe: the renderer is isolated from Node.js at the Electron level, every file write is guarded by a path traversal check, manifest files are capped at a safe size, folder names are sanitised before they become filesystem paths, and a journal detects and recovers from interrupted backups. Understanding these mechanisms helps when debugging unexpected errors or auditing the codebase.
+
+## Electron Context Isolation
+
+The `BrowserWindow` is created with both `contextIsolation: true` and `nodeIntegration: false`:
+
+```js
+// main.js
+webPreferences: {
+  preload: path.join(__dirname, "preload.js"),
+  contextIsolation: true,
+  nodeIntegration: false,
+},
+```
+
+The renderer has **zero access to Node.js APIs**. There is no `require`, no `fs`, no `process` in `renderer/app.js`. Every OS operation must pass through an explicit entry in `window.kopiaAPI`, which is the only surface the preload script exposes.
+
+`preload.js` uses `contextBridge.exposeInMainWorld` to declare each allowed function by name:
+
+```js
+// preload.js
+contextBridge.exposeInMainWorld("kopiaAPI", {
+  listDrives:       () => ipcRenderer.invoke("drives:list"),
+  scanDirectory:    (dirPath, excludePatterns) =>
+                      ipcRenderer.invoke("fs:scan-directory", dirPath, excludePatterns),
+  backupCopyFiles:  (tasks, options) =>
+                      ipcRenderer.invoke("backup:copy-files", tasks, options),
+  // ... every other entry is equally explicit
+});
+```
+
+If an entry is not listed in `preload.js`, the renderer cannot invoke it — there is no `ipcRenderer.invoke` available in the renderer context directly.
+
+<Tip>
+  The `renderer/index.html` reinforces this with a strict Content Security Policy that prevents any external resource from loading:
+
+  ```html
+  <meta
+    http-equiv="Content-Security-Policy"
+    content="default-src 'self'; script-src 'self'; style-src 'self';
+             img-src 'self' data:; object-src 'none'"
+  />
+  ```
+
+  This means no CDN scripts, no inline event handlers evaluated as scripts, and no `<object>` embeds. All assets must be local to the app bundle.
+</Tip>
+
+## Path Traversal Protection (`safePath`)
+
+Every file write in the backup and restore pipelines calls `safePath` before touching the filesystem. The function is defined in `lib/core.js` and is exercised by the test suite:
+
+```js
+// lib/core.js
+function safePath(root, relativePath) {
+  if (!relativePath || typeof relativePath !== "string") {
+    throw new Error("Ruta no válida.");
+  }
+  if (relativePath.includes("\0")) {
+    throw new Error("Ruta contiene caracteres nulos.");
+  }
+  const resolved = path.resolve(root, relativePath);
+  let normalizedRoot = path.resolve(root);
+  if (!normalizedRoot.endsWith(path.sep)) normalizedRoot += path.sep;
+  if (!resolved.startsWith(normalizedRoot) && resolved !== path.resolve(root)) {
+    throw new Error("Ruta fuera del disco destino.");
+  }
+  return resolved;
+}
+```
+
+<Accordion title="How safePath stops traversal attempts">
+  `path.resolve` collapses any `..` segments before the comparison. If a task contains `relativeDest: "../../Windows/System32/evil.dll"`, `path.resolve(destRoot, relativeDest)` will produce a path outside `destRoot`, fail the `startsWith` check, and throw `"Ruta fuera del disco destino."` before any file handle is opened.
+
+  Null-byte injection (`\0`) is also rejected explicitly, because some operating systems treat `\0` as a path terminator and could be used to bypass a suffix check.
+</Accordion>
+
+`safePath` is called in two places in `main.js`:
+
+1. **`copyOneTask`** — resolves `task.relativeDest` against `task.destRoot` before every `fs.promises.copyFile` call during backup.
+2. **`restore:copy-files` handler** — resolves `file.path` against `targetDir` before every restore write.
+
+The `checkJournals` function in `lib/core.js` also calls `safePath` when deleting partial files during crash-recovery cleanup, ensuring journal entries cannot reference paths outside the backup drive.
+
+## Manifest Size Limit
+
+The `restore:scan` IPC handler rejects manifests larger than 50 MB before parsing them:
+
+```js
+// main.js — restore:scan handler
+const rawManifest = fs.readFileSync(manifestPath, "utf-8");
+if (rawManifest.length > 50 * 1024 * 1024) {
+  throw new Error("El manifiesto es demasiado grande (posible corrupción).");
+}
+```
+
+A legitimate manifest rarely exceeds a few megabytes even for folders with hundreds of thousands of files. The 50 MB limit prevents a corrupted or maliciously crafted manifest from triggering a multi-gigabyte `JSON.parse` that would exhaust memory in the main process.
+
+## Safe Folder Naming (`safeName`)
+
+Before a source folder name is used as a directory name on the backup drive or as a manifest filename, it passes through `safeName`:
+
+```js
+// lib/core.js
+function safeName(name) {
+  return String(name).replace(/[<>:"/\\|?*\x00-\x1f]/g, "_").slice(0, 120) || "carpeta";
+}
+```
+
+Every character forbidden by Windows NTFS (`< > : " / \ | ? *`) and every control character (U+0000–U+001F) is replaced with `_`. The result is capped at 120 characters. If sanitisation produces an empty string (e.g., the name was entirely control characters), the function falls back to `"carpeta"` rather than returning an empty path segment.
+
+## Name Collision Prevention (`uniqueSourceName`)
+
+`safeName` is deterministic: two source folders that end with the same directory name (e.g., `C:\ProjectA\Backup` and `D:\ProjectB\Backup`) would both map to `"Backup"` and therefore share the same manifest and destination folder.
+
+`uniqueSourceName()` in `renderer/app.js` detects this before a source is added to the state. When a collision is found it appends the parent folder name to the new source (e.g., `"Backup (ProjectB)"`), or a numeric suffix if the parent name also collides. This ensures each source folder always has a unique manifest file and a unique directory under `KopiaDesk_Backup\`.
+
+## Journal-Based Crash Recovery
+
+Before any file is copied, `backup:copy-files` opens a JSONL journal file at `.kopia-data/journal/backup_<timestamp>.jsonl`. The first line records all planned destination paths; each subsequent line records a completed path as it finishes:
+
+```js
+// lib/core.js — startJournal
+const header = {
+  startedAt: new Date().toISOString(),
+  planned: tasks.map((t) => t.relativeDest),
+};
+fs.writeFileSync(fp, JSON.stringify(header) + "\n");
+```
+
+```js
+// lib/core.js — appendJournalDone (called after each successful copy)
+fs.appendFileSync(journalPath, JSON.stringify(relativeDest) + "\n");
+```
+
+On a clean finish the journal file is deleted (`finishJournal`). If the process is killed mid-backup — power loss, drive ejection, forced quit — the journal file remains. The next time that destination drive is selected, `journal:peek` reads the journal and reports how many files were left incomplete without deleting anything. Only when the user clicks **"Continuar y limpiar"** does `journal:check` delete the partial files and remove the journal.
+
+See the [Backup Structure](/internals/backup-structure) page for the exact journal file location.
+
+## No File-Level Encryption
+
+<Warning>
+  Kopia Desk does **not** encrypt backup files. Files are copied to the destination drive in plaintext. Anyone with access to the drive can read them.
+
+  The README documents this decision: file-level AES encryption was prototyped and removed because encrypting the entire USB drive at the OS level (BitLocker or equivalent) is a more practical approach that protects all files — including ones copied manually — without the overhead of per-file cipher operations. If your threat model requires encrypted backups, enable BitLocker or another full-disk encryption tool on the destination drive.
+</Warning>

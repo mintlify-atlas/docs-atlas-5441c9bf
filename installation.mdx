@@ -1,0 +1,124 @@
+---
+title: "Install Kopia Desk on Windows"
+sidebarTitle: "Installation"
+description: "Set up Kopia Desk on Windows from source. Requires Node.js 20 or later. Covers cloning, dependency install, and running in development mode."
+---
+
+Kopia Desk is currently distributed as source code and runs via Electron in development mode. The setup takes about two minutes: clone the repository, install the two dev dependencies, and launch. There are no production npm packages to install — all backup logic uses Node.js built-ins (`fs`, `crypto`, `child_process`, `zlib`).
+
+## Prerequisites
+
+Before you begin, make sure the following are available on your machine:
+
+| Requirement | Version | Notes |
+|---|---|---|
+| **Windows** | Any modern version | Required — drive detection uses PowerShell `Get-Volume` / `Get-PhysicalDisk`; deduplication uses NTFS hardlinks |
+| **Node.js** | ≥ 20 | Download from [nodejs.org](https://nodejs.org) |
+| **npm** | Included with Node.js | No separate install needed |
+| **Git** | Any recent version | Needed to clone the repository |
+
+<Note>
+  Kopia Desk is **Windows-only**. Drive detection relies on PowerShell cmdlets (`Get-Volume`, `Get-Partition`, `Get-PhysicalDisk`) that do not exist on macOS or Linux. NTFS hardlinks used for content deduplication are also a Windows-specific filesystem feature.
+</Note>
+
+## Install Steps
+
+<Steps>
+  <Step title="Clone the repository">
+    Open PowerShell or Windows Terminal and clone the project from GitHub:
+
+    ```powershell
+    git clone https://github.com/Pachanga12/Kopia_Desk_Beta_1.git
+    cd Kopia_Desk_Beta_1
+    ```
+  </Step>
+
+  <Step title="Install dependencies">
+    Run `npm install` to download the two dev dependencies — Electron and electron-builder. There are no production dependencies.
+
+    ```powershell
+    npm install
+    ```
+
+    After this step your `node_modules` folder will contain:
+
+    | Package | Version | Purpose |
+    |---|---|---|
+    | `electron` | `^43.0.0` | Desktop shell and IPC runtime |
+    | `electron-builder` | `^26.15.3` | Packages the app as an NSIS installer |
+  </Step>
+
+  <Step title="Start the app">
+    Launch Kopia Desk in development mode:
+
+    ```powershell
+    npm start
+    ```
+
+    This runs `electron .`, which loads `main.js` as the main process and opens the app window (1300 × 820 px, minimum 800 × 600 px).
+  </Step>
+
+  <Step title="Run the test suite (optional)">
+    Kopia Desk ships a test suite for `lib/core.js` — the scan, hashing, exclusion, and journal logic — that runs entirely with the native Node.js test runner, no Electron required:
+
+    ```powershell
+    npm test
+    ```
+
+    This executes `node --test`, which picks up `test/core.test.js` automatically. All 31 tests should pass.
+  </Step>
+
+  <Step title="Build an installer (optional)">
+    To produce a standalone Windows installer (NSIS), run:
+
+    ```powershell
+    npm run build
+    ```
+
+    The installer is written to `dist/`. If the build fails due to a symlink error on the `winCodeSign` package, copy the extracted directory manually to:
+
+    ```
+    %LOCALAPPDATA%\electron-builder\Cache\winCodeSign\winCodeSign-2.6.0\
+    ```
+
+    To skip code signing during a local build, set the environment variable first:
+
+    ```powershell
+    $env:CSC_IDENTITY_AUTO_DISCOVERY = "false"
+    npm run build
+    ```
+  </Step>
+</Steps>
+
+## Project Structure
+
+After cloning, the repository layout is:
+
+```
+Kopia_Desk_Beta_1/
+├── main.js          ← Electron main process (Node.js, full OS access)
+├── preload.js       ← contextBridge — exposes window.kopiaAPI to the renderer
+├── lib/
+│   └── core.js      ← Scan, hash, drive detection, journal (testeable without Electron)
+├── renderer/
+│   ├── index.html   ← App UI structure
+│   ├── app.js       ← UI logic (no Node access)
+│   └── styles.css   ← Light/dark theme, component styles
+├── test/
+│   └── core.test.js ← node --test suite for lib/core.js
+├── assets/
+│   └── Kopia_Desk.png
+└── package.json
+```
+
+<Warning>
+  If drive detection returns no results or the `.kopia-data` metadata folder is not hidden after a backup, try running PowerShell **as Administrator** before launching the app:
+
+  ```powershell
+  # Right-click PowerShell → "Run as administrator", then:
+  cd Kopia_Desk_Beta_1
+  npm start
+  ```
+
+  Drive listing uses `Get-Volume` and disk-type detection uses `Get-PhysicalDisk`, both of which may require elevated permissions depending on your Windows configuration. The `attrib +h +s` command that hides the metadata folder can also fail without sufficient privileges.
+</Warning>

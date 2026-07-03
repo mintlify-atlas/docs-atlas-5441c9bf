@@ -1,47 +1,137 @@
 ---
-title: "Quickstart"
-description: "Begin with a guide on the fastest path to a successful outcome"
+title: "Get Started with Kopia Desk in 5 Minutes"
+sidebarTitle: "Quickstart"
+description: "Learn how to back up your first folder with Kopia Desk. Add a source, pick a destination drive, scan for changes, and copy in five guided steps."
 ---
 
-Describe how someone begins using your product. What is the first thing they need to do? Are there any prerequisites?
+This guide walks you through your first backup with Kopia Desk — from launching the app to watching the progress bar finish. The entire flow takes about five minutes the first time, and less than one minute on subsequent runs when only a few files have changed. Connect your external drive or USB stick before you begin.
 
-A quickstart should take someone from zero to using your product. They'll get a quick win and a sense of what they can accomplish.
+<Note>
+  On the very first backup of a folder, no manifest exists yet, so Kopia Desk treats every file as new and copies all of them. Subsequent runs compare against that saved manifest and copy only what has changed.
+</Note>
 
-## Prerequisites
-
-Before you begin, you must have:
-
-- Requirement one (for example, Node.js 18+, a free account, an API key)
-- Requirement two (for example, a compatible device, a compatible browser, a compatible operating system)
-
-## Get started
+## Running Your First Backup
 
 <Steps>
-  <Step title="Install">
-    Describe how to install your product or sign up.
+  <Step title="Launch the app">
+    Open PowerShell in the project directory and start Kopia Desk:
 
-    ```bash
-    npm install your-package
+    ```powershell
+    npm start
     ```
+
+    The main window opens at 1300 × 820 px. The top bar shows counters for selected folders and total size; the sidebar on the left contains all controls.
   </Step>
-  <Step title="Configure">
-    Describe any setup or configuration needed before first use.
 
-    ```bash
-    your-cli init
-    ```
+  <Step title="Add a source folder">
+    Tell Kopia Desk which folder to back up. You have two options:
+
+    **Quick-access buttons** — Kopia Desk automatically detects which of the standard Windows user folders exist on your PC and shows a button for each one. Click any button to add it instantly.
+
+    | Button label | Windows folder |
+    |---|---|
+    | Imágenes | Pictures |
+    | Documentos | Documents |
+    | Descargas | Downloads |
+    | Música | Music |
+    | Videos | Videos |
+    | Escritorio | Desktop |
+
+    **Custom folder dialog** — Click **+ Añadir carpeta** to open a native Windows folder picker and choose any directory.
+
+    You can add multiple source folders; each one is backed up and tracked independently. If two different source paths share the same folder name (for example `C:\ProjectA\Backup` and `D:\ProjectB\Backup`), Kopia Desk automatically disambiguates the second one by appending the parent folder name or a numeric suffix, so their manifests and backup directories never collide.
   </Step>
-  <Step title="Run it">
-    Show the first thing a user does to see it working.
 
-    ```bash
-    your-cli start
+  <Step title="Select a destination drive">
+    Open the destination dropdown in the sidebar. Kopia Desk queries PowerShell (`Get-Volume`) and lists every connected drive with its label and available free space. Select the external drive or USB stick where you want to store the backup.
+
+    Backup files are written to `<drive>\KopiaDesk_Backup\<folder-name>\`. A hidden `.kopia-data\` directory on the same drive holds manifests, version history, the operation journal, and logs.
+  </Step>
+
+  <Step title="Review backup options">
+    The sidebar exposes four toggles. Hover over any option label for a tooltip that explains what it does.
+
+    | Option | Default | Effect |
+    |---|---|---|
+    | **Versioning** | On | Before overwriting a changed file in the backup, saves the previous version compressed with gzip in `.kopia-data\versions\<date>\` |
+    | **Deep hash** | Off | Computes a full SHA-256 over every file instead of the fast header+tail hash |
+    | **Deduplication** | On | Creates NTFS hardlinks for files whose content already exists in the backup, avoiding duplicate storage |
+    | **Show technical details** | Off | Reveals disk type (SSD/HDD/USB) and the concurrency value being used for this run |
+  </Step>
+
+  <Step title="Scan for changes">
+    Click **Escanear cambios**. Kopia Desk recursively walks every source folder, skipping files and directories that match the exclusion patterns:
+
     ```
+    Thumbs.db  •  desktop.ini  •  $RECYCLE.BIN  •  System Volume Information
+    .git  •  node_modules  •  *.tmp  •  ~$*
+    ```
+
+    A progress bar tracks the scan phase. For each source folder, Kopia Desk then loads the saved manifest (if one exists) and classifies every file into one of three categories:
+
+    - **New** — present in the scan, absent from the manifest
+    - **Changed** — present in both, but size or modification time differ (and hash confirms a real change)
+    - **Deleted** — present in the manifest, absent from the scan (the file was removed from your PC)
+  </Step>
+
+  <Step title="Review the changes panel">
+    After scanning, each source folder appears as a card in the main panel showing three counts with colour-coded badges: new files, changed files, and deleted files.
+
+    For each category on each folder card you can choose to **accept** (include in the upcoming copy) or **skip** (leave as-is). Hover over the "deleted" badge for a reminder that deleted files are only removed from the manifest — the copy in the backup is always preserved.
+  </Step>
+
+  <Step title="Verify free space">
+    The sidebar shows a live free-space indicator for the selected drive. If the total size of accepted files exceeds the available space, a warning appears showing exactly how much additional space is needed, and the copy button is disabled until enough space is freed — either by ejecting and swapping to a larger drive, or by deselecting some categories.
+  </Step>
+
+  <Step title="Start the backup">
+    Click **Copiar aceptados**. Kopia Desk:
+
+    1. Opens a JSONL journal for crash recovery
+    2. Detects the drive type via PowerShell and picks the optimal concurrency (e.g. up to 8 parallel writes on NVMe SSD for small files, 1 on a spinning HDD)
+    3. If versioning is on, compresses and saves the previous version of each changed file before overwriting
+    4. Copies new and changed files, creating hardlinks for any content already in the deduplication index
+    5. Emits a progress event after every file
+
+    The copy button is replaced by the progress bar for the duration of the run.
+  </Step>
+
+  <Step title="Monitor progress">
+    The progress bar at the bottom of the window updates after every file. It shows:
+
+    - **Phase** — `backup` during the copy, `restore` or `restore-scan` during a restore operation
+    - **Percent complete** — calculated as `(files copied / total files) × 100`
+    - **Current file** — the relative path of the file being written right now
+  </Step>
+
+  <Step title="Confirm the log entry">
+    When the copy finishes, the journal file is deleted (no incomplete run to clean up) and a log entry appears in the log panel at the bottom of the window. The entry is also persisted as a JSON file in `.kopia-data\logs\` on the destination drive, named `<folder>_<timestamp>.json`.
+
+    The manifest for each backed-up folder is updated on the drive, so the next scan will use today's state as its baseline.
   </Step>
 </Steps>
 
 <Tip>
-  Give people a way to get help. This could be a link to a support page, a chat with a customer support agent, or a forum for your product.
-
-  Example: Need help? Reach out to us at [support@yourcompany.com](mailto:support@yourcompany.com).
+  **Interrupted backup?** If a power cut, system crash, or accidental drive disconnection stops a copy mid-run, Kopia Desk detects the leftover journal file the next time you select that destination drive. It shows how many partial files were left behind and prompts you to **Continuar y limpiar** (clean up and proceed) or **Ahora no** (skip for now). If you skip and start a new backup anyway, the cleanup happens automatically before copying begins — so a partial file can never be mistaken for a complete one.
 </Tip>
+
+## After Your First Backup
+
+Once the backup is complete, two additional tabs become useful.
+
+<Accordion title="Compare tab — find and restore missing files">
+  The **Compare** tab lets you check whether files in your backup are still present on your PC without restoring everything. Select which backed-up folders to check and which local folder to compare against, then start the comparison.
+
+  Kopia Desk reports two lists:
+
+  - **Missing from PC** — files in the backup manifest that no longer exist in the local folder. You can restore any or all of them individually.
+  - **Lost from backup** — files the manifest says were backed up but that are no longer present on the destination drive (e.g. deleted manually or lost to drive damage). Removing these from the manifest lets the next backup re-copy them.
+
+  The local comparison folder is remembered per backup folder, so you are not asked for it again on the next comparison.
+</Accordion>
+
+<Accordion title="Restore tab — full folder restore to any location">
+  The **Restore** tab copies the complete contents of a backup folder to any directory you choose, without needing a local copy to compare against. This is the right tool when the original PC profile no longer exists — for example, after a Windows reinstall or when setting up a replacement machine with a different user account.
+
+  Select the backup folder from the list, choose a destination directory via the native folder picker, and click restore. Progress is tracked file-by-file with the same progress bar used during backup.
+</Accordion>

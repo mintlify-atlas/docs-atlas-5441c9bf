@@ -1,0 +1,234 @@
+---
+title: "Restore Operations IPC: Scan, List, and Copy Back"
+sidebarTitle: "Restore Operations"
+description: "window.kopiaAPI methods for listing backed-up folders, scanning for missing files, restoring a full folder, and copying files back to the local PC."
+---
+
+The restore surface of `window.kopiaAPI` covers two distinct workflows. The **Compare** tab uses `restoreScan()` to diff the backup manifest against a local folder and return only the files that are missing from the PC. The **Restore** tab uses `restoreFullList()` to enumerate every file in a backup folder so the user can restore it wholesale to any destination—useful after a reformat or when restoring to a different user profile. Both workflows end with `restoreCopyFiles()`, which copies files back from the backup drive with the same bounded-concurrency worker pool used during backup.
+
+---
+
+## `restoreListSources(backupDrive)`
+
+Reads the `.kopia-data/manifests/` directory on the backup drive and returns the names of every backed-up folder that has a current manifest. Previous-version files (`.prev.json`) are excluded.
+
+<ParamField path="backupDrive" type="string" required>
+  Root path of the backup drive, e.g. `"E:\\"`.
+</ParamField>
+
+**Returns:** `Promise<string[]>` — array of backed-up folder names with the `.json` extension stripped (e.g. `["Pictures", "Documents"]`). Returns `[]` if the manifests directory does not exist.
+
+```javascript
+const sources = await window.kopiaAPI.restoreListSources('E:\\');
+// ['Pictures', 'Documents', 'Downloads']
+```
+
+---
+
+## `restoreFullList(backupDrive, sourceName)`
+
+Loads the manifest for `sourceName` from the backup drive and returns every entry with an additional `backupFullPath` field containing the absolute path to the file on the backup drive. This is the data source for the **Restore** tab, which lists all backed-up files regardless of whether they exist locally.
+
+<ParamField path="backupDrive" type="string" required>
+  Root path of the backup drive, e.g. `"E:\\"`.
+</ParamField>
+
+<ParamField path="sourceName" type="string" required>
+  The backed-up folder name as returned by `restoreListSources()`.
+</ParamField>
+
+**Returns:** `Promise<FullListEntry[]>`
+
+<ResponseField name="[each entry]" type="FullListEntry" required>
+  All fields from the original `FileEntry` in the manifest, plus one additional field:
+
+  <Expandable title="FullListEntry fields">
+    <ResponseField name="name" type="string" required>
+      Base file name, e.g. `"beach.jpg"`.
+    </ResponseField>
+    <ResponseField name="path" type="string" required>
+      Path relative to the backed-up source root.
+    </ResponseField>
+    <ResponseField name="fullPath" type="string" required>
+      Absolute path that was recorded at backup time (the original location on the source PC).
+    </ResponseField>
+    <ResponseField name="size" type="number" required>
+      File size in bytes at backup time.
+    </ResponseField>
+    <ResponseField name="lastModified" type="number" required>
+      Last-modified timestamp in milliseconds at backup time.
+    </ResponseField>
+    <ResponseField name="hash" type="string | null" required>
+      Hash recorded in the manifest, or `null` if the backup was run without deep hashing.
+    </ResponseField>
+    <ResponseField name="backupFullPath" type="string" required>
+      Resolved absolute path to the file on the backup drive: `<backupDrive>/KopiaDesk_Backup/<safeName(sourceName)>/<relativePath>`.
+    </ResponseField>
+  </Expandable>
+</ResponseField>
+
+<Note>
+  `restoreFullList()` throws `"No se encontró manifiesto de backup para: <sourceName>"` if the manifest file does not exist on the backup drive.
+</Note>
+
+---
+
+## `restoreScan(backupDrive, sourceName, localPath)`
+
+Compares the backup manifest for `sourceName` against the current state of `localPath` on the PC, using `scanDirectoryRecursive` with `DEFAULT_EXCLUDES`. For each entry in the manifest it determines whether the file is present locally and whether it still exists on the backup drive. Missing files (in backup but not local) are returned as candidates for restoration; files that have disappeared from the backup drive are reported separately so the user knows they cannot be recovered.
+
+<ParamField path="backupDrive" type="string" required>
+  Root path of the backup drive, e.g. `"E:\\"`.
+</ParamField>
+
+<ParamField path="sourceName" type="string" required>
+  The backed-up folder name as returned by `restoreListSources()`.
+</ParamField>
+
+<ParamField path="localPath" type="string" required>
+  Absolute path to the local folder to compare against the backup manifest. Does not have to be the same path recorded at backup time—useful when restoring to a different user profile or PC.
+</ParamField>
+
+**Returns:** `Promise<ScanResult>`
+
+<ResponseField name="missing" type="MissingEntry[]" required>
+  Files present in the backup manifest and on the backup drive, but absent from `localPath`. These are the files that `restoreCopyFiles()` can restore.
+
+  <Expandable title="MissingEntry fields">
+    All `FileEntry` fields (`name`, `path`, `fullPath`, `size`, `lastModified`, `hash`) from the manifest, plus:
+
+    <ResponseField name="backupFullPath" type="string" required>
+      Absolute path to the file on the backup drive — the source path for `restoreCopyFiles()`.
+    </ResponseField>
+  </Expandable>
+</ResponseField>
+
+<ResponseField name="lostFromBackup" type="LostEntry[]" required>
+  Files recorded in the manifest but no longer physically present on the backup drive (e.g. deleted manually or drive corruption). These files cannot be restored.
+
+  <Expandable title="LostEntry fields">
+    All `FileEntry` fields from the manifest plus:
+
+    <ResponseField name="path" type="string" required>
+      Relative path of the lost file.
+    </ResponseField>
+  </Expandable>
+</ResponseField>
+
+<ResponseField name="totalChecked" type="number" required>
+  Total number of manifest entries examined. Equals the length of the manifest, not just the missing count.
+</ResponseField>
+
+### Progress events
+
+`restoreScan()` emits a `progress` event every 50 files checked. Subscribe with [`window.kopiaAPI.onProgress()`](/api/manifest-and-settings#onprogress-callback) before calling this method.
+
+| Field | Type | Description |
+|---|---|---|
+| `phase` | `"restore-scan"` | Constant identifier for this operation |
+| `current` | `number` | Files checked so far |
+| `total` | `number` | Total manifest entries |
+| `file` | `string` | Relative path of the most recently checked file |
+| `percent` | `number` | `Math.round((current / total) * 100)` |
+
+<Warning>
+  `restoreScan()` throws if the manifest file is not found, if it cannot be parsed as a JSON object, or if the raw manifest data exceeds 50 MB (a size guard against corruption).
+</Warning>
+
+```javascript
+const unsubscribe = window.kopiaAPI.onProgress(({ phase, percent }) => {
+  if (phase === 'restore-scan') updateProgressBar(percent);
+});
+
+const { missing, lostFromBackup, totalChecked } = await window.kopiaAPI.restoreScan(
+  'E:\\',
+  'Pictures',
+  'C:\\Users\\NewUser\\Pictures'
+);
+
+unsubscribe();
+
+console.log(`Checked ${totalChecked} files`);
+console.log(`${missing.length} files to restore`);
+console.log(`${lostFromBackup.length} files lost from backup`);
+```
+
+---
+
+## `restoreCopyFiles(files, targetDir, options)`
+
+Copies an array of files from the backup drive to `targetDir`, preserving the relative directory structure recorded in each entry's `path` field. Uses the same bounded-concurrency worker pool as `backupCopyFiles()`. Parent directories are created automatically via `fs.promises.mkdir({ recursive: true })`.
+
+<ParamField path="files" type="MissingEntry[]" required>
+  Array of file entries to restore. Each entry must have both `backupFullPath` (the absolute path to read from on the backup drive) and `path` (the relative path used to reconstruct the directory structure under `targetDir`). These are the objects returned in the `missing` array by `restoreScan()` or from the `FullListEntry` array returned by `restoreFullList()`.
+</ParamField>
+
+<ParamField path="targetDir" type="string" required>
+  Absolute path to the local directory where files will be restored. The relative path from each `file.path` is appended to this root, validated by `safePath()`.
+</ParamField>
+
+<ParamField path="options" type="object">
+  Optional copy behaviour.
+
+  <Expandable title="options fields">
+    <ParamField path="concurrency" type="number">
+      Maximum number of simultaneous file copies. Defaults to `3` when omitted or `<= 0`.
+    </ParamField>
+  </Expandable>
+</ParamField>
+
+**Returns:** `Promise<{ copied: number, errors: ErrorEntry[] }>`
+
+<ResponseField name="copied" type="number" required>
+  Number of files successfully copied to `targetDir`.
+</ResponseField>
+
+<ResponseField name="errors" type="ErrorEntry[]" required>
+  Files that could not be copied.
+
+  <Expandable title="ErrorEntry fields">
+    <ResponseField name="file" type="string" required>
+      The relative `path` of the file that failed.
+    </ResponseField>
+    <ResponseField name="error" type="string" required>
+      Error message from the underlying `fs.promises.copyFile` call.
+    </ResponseField>
+  </Expandable>
+</ResponseField>
+
+### Progress events
+
+`restoreCopyFiles()` emits a `progress` event after each file is successfully copied.
+
+| Field | Type | Description |
+|---|---|---|
+| `phase` | `"restore"` | Constant identifier for this operation |
+| `current` | `number` | Files copied so far |
+| `total` | `number` | Total files in the `files` array |
+| `file` | `string` | Relative `path` of the file just copied |
+| `percent` | `number` | `Math.round((current / total) * 100)` |
+
+```javascript
+const unsubscribe = window.kopiaAPI.onProgress(({ phase, percent, file }) => {
+  if (phase === 'restore') console.log(`Restoring ${percent}% — ${file}`);
+});
+
+const result = await window.kopiaAPI.restoreCopyFiles(
+  missing,
+  'C:\\Users\\NewUser\\Pictures',
+  { concurrency: 4 }
+);
+
+unsubscribe();
+// result: { copied: 38, errors: [] }
+```
+
+---
+
+## `rememberSourcePath` and `knownSourcePaths`
+
+These two methods store and retrieve a `sourceName → localPath` mapping so the Compare tab can pre-fill the local folder path without asking the user every time. They are covered in full detail on the [Manifests & Settings](/api/manifest-and-settings) page; a brief summary follows.
+
+**`rememberSourcePath(destRoot, sourceName, sourcePath)`** — Merges `{ [sourceName]: sourcePath }` into `.kopia-data/sources.json` on the backup drive. Returns `Promise<{ ok: true }>`.
+
+**`knownSourcePaths(destRoot)`** — Returns `Promise<{ [sourceName: string]: string }>`, the full mapping of every remembered `sourceName → localPath` pair. Returns `{}` if `sources.json` does not exist.
